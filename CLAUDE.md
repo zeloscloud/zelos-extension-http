@@ -11,6 +11,8 @@ just test       # Run pytest
 just check      # Ruff lint
 just format     # Ruff format + fix
 just dev        # Run extension locally
+just package    # Package for marketplace (.tar.gz)
+just release X.Y.Z  # Bump version, test, tag
 ```
 
 ## Structure
@@ -27,7 +29,7 @@ zelos-extension-http/
 │   └── demo/
 │       ├── simulator.py                 # aiohttp demo weather station server
 │       └── demo_device.json             # Demo endpoint map
-└── tests/test_http.py                   # Unit + integration tests (66 tests)
+└── tests/test_http.py                   # Unit + integration tests (72 tests)
 ```
 
 ## Key Patterns

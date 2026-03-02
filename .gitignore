@@ -1,0 +1,59 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments / uv state
+.venv/
+.uv/
+.venv*/
+
+# Tooling caches
+.ty_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+zelos_extension_http.egg-info/
+zelos-extension-http-v*.tar.gz
+scripts/__pycache__/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# OS / editor junk
+.DS_Store
+.idea/
+
+# Unit test / coverage reports
+htmlcov/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+.hypothesis/
+.pytest_cache/
+.artifacts/
+.pytest-zelos-artifacts/
+cover/
+
+# Environments
+.env
+.envrc
+
+# Zelos
+.last_config
+.uploaded.*

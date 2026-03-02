@@ -9,6 +9,7 @@ categories = ["IoT", "Networking", "Monitoring"]
 
 icon = "assets/icon.svg"
 readme = "README.md"
+changelog = "CHANGELOG.md"
 
 [zelos]
 version = ">=25.0.22-0"
