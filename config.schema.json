@@ -1,0 +1,66 @@
+{
+  "$comment": "HTTP extension configuration schema. See https://docs.zeloscloud.io/sdk/how-to/develop-extensions/#configuration",
+  "type": "object",
+  "title": "HTTP Configuration",
+  "description": "Configure HTTP/REST API endpoint polling",
+  "properties": {
+    "demo": {
+      "type": "boolean",
+      "title": "Demo Mode",
+      "description": "Use built-in weather station simulator (no server required)",
+      "default": false
+    },
+    "base_url": {
+      "type": "string",
+      "title": "Base URL",
+      "description": "Base URL for all endpoints (e.g., http://192.168.1.100:8080)",
+      "default": "http://127.0.0.1:8080",
+      "ui:placeholder": "http://host:port"
+    },
+    "endpoint_map_file": {
+      "type": "string",
+      "title": "Endpoint Map File",
+      "description": "Path to JSON endpoint map file",
+      "ui:widget": "file-picker",
+      "ui:options": {
+        "accept": ".json"
+      }
+    },
+    "poll_interval": {
+      "type": "number",
+      "title": "Poll Interval (seconds)",
+      "description": "How often to poll endpoints",
+      "default": 1.0,
+      "minimum": 0.1,
+      "maximum": 60.0
+    },
+    "timeout": {
+      "type": "number",
+      "title": "Request Timeout (seconds)",
+      "description": "HTTP request timeout",
+      "default": 5.0,
+      "minimum": 0.5,
+      "maximum": 30.0
+    },
+    "headers": {
+      "type": "string",
+      "title": "Custom Headers (JSON)",
+      "description": "JSON object of headers to include with every request (e.g., {\"Authorization\": \"Bearer token\"})",
+      "ui:placeholder": "{}"
+    },
+    "verify_ssl": {
+      "type": "boolean",
+      "title": "Verify SSL",
+      "description": "Verify SSL certificates for HTTPS endpoints",
+      "default": true
+    },
+    "log_level": {
+      "type": "string",
+      "title": "Log Level",
+      "description": "Logging verbosity",
+      "enum": ["DEBUG", "INFO", "WARNING", "ERROR"],
+      "default": "INFO"
+    }
+  },
+  "required": ["base_url"]
+}

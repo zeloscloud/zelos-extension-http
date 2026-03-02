@@ -1,0 +1,107 @@
+{
+  "name": "weather_station",
+  "description": "Simulated weather station with environmental sensors and system monitoring",
+  "events": {
+    "environment": [
+      {
+        "name": "temperature",
+        "path": "/api/sensors",
+        "json_path": "temperature",
+        "datatype": "float32",
+        "unit": "C"
+      },
+      {
+        "name": "humidity",
+        "path": "/api/sensors",
+        "json_path": "humidity",
+        "datatype": "float32",
+        "unit": "%"
+      },
+      {
+        "name": "pressure",
+        "path": "/api/sensors",
+        "json_path": "pressure",
+        "datatype": "float32",
+        "unit": "hPa"
+      },
+      {
+        "name": "wind_speed",
+        "path": "/api/sensors",
+        "json_path": "wind_speed",
+        "datatype": "float32",
+        "unit": "m/s"
+      }
+    ],
+    "power": [
+      {
+        "name": "battery_voltage",
+        "path": "/api/power",
+        "json_path": "battery_voltage",
+        "datatype": "float32",
+        "unit": "V"
+      },
+      {
+        "name": "solar_power",
+        "path": "/api/power",
+        "json_path": "solar_watts",
+        "datatype": "float32",
+        "unit": "W"
+      },
+      {
+        "name": "battery_soc",
+        "path": "/api/power",
+        "json_path": "soc",
+        "datatype": "uint8",
+        "unit": "%"
+      }
+    ],
+    "system": [
+      {
+        "name": "uptime",
+        "path": "/api/system",
+        "json_path": "uptime_seconds",
+        "datatype": "uint32",
+        "unit": "s"
+      },
+      {
+        "name": "cpu_temp",
+        "path": "/api/system",
+        "json_path": "cpu_temp",
+        "datatype": "float32",
+        "unit": "C"
+      },
+      {
+        "name": "free_memory",
+        "path": "/api/system",
+        "json_path": "free_memory_mb",
+        "datatype": "uint32",
+        "unit": "MB"
+      }
+    ],
+    "config": [
+      {
+        "name": "sample_rate",
+        "path": "/api/config",
+        "json_path": "sample_rate",
+        "datatype": "float32",
+        "unit": "Hz",
+        "writable": true
+      },
+      {
+        "name": "alarm_threshold",
+        "path": "/api/config",
+        "json_path": "alarm_threshold",
+        "datatype": "float32",
+        "unit": "C",
+        "writable": true
+      },
+      {
+        "name": "station_name",
+        "path": "/api/config",
+        "json_path": "station_name",
+        "datatype": "string",
+        "writable": true
+      }
+    ]
+  }
+}
