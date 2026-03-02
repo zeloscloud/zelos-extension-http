@@ -1,6 +1,6 @@
 [project]
 name = "zelos-extension-http"
-version = "0.1.0"
+version = "0.1.1"
 description = "HTTP/REST API polling extension for Zelos"
 authors = [{ name = "Zelos", email = "support@zeloscloud.io" }]
 readme = "README.md"
