@@ -686,6 +686,24 @@ class TestActionsUnit:
         assert "not writable" in result["error"]
 
 
+class TestActionFlags:
+    """Pins each action's flags, so a new action or a changed flag is a deliberate choice."""
+
+    def test_action_flags(self):
+        actual = {
+            name: (member._action.read_only, member._action.hidden)
+            for name, member in vars(HttpClient).items()
+            if hasattr(member, "_action")
+        }
+        assert actual == {
+            "get_status": (True, True),
+            "send_request": (False, False),
+            "list_endpoints": (True, True),
+            "read_endpoint": (False, False),
+            "write_endpoint_action": (False, False),
+        }
+
+
 class TestActionsIntegration:
     """Integration tests for SDK actions with demo server."""
 

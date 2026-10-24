@@ -415,7 +415,9 @@ class HttpClient:
         return any(ind in error_str for ind in connection_indicators)
 
     # SDK Actions
-    @zelos_sdk.action("Get Status", "Get connection and polling status")
+    @zelos_sdk.action(
+        "Get Status", "Get connection and polling status", read_only=True, hidden=True
+    )
     def get_status(self) -> dict[str, Any]:
         """Get current client status."""
         return {
@@ -470,7 +472,9 @@ class HttpClient:
 
         return self._run_on_loop(_send())
 
-    @zelos_sdk.action("List Endpoints", "List all configured endpoints")
+    @zelos_sdk.action(
+        "List Endpoints", "List all configured endpoints", read_only=True, hidden=True
+    )
     def list_endpoints(self) -> dict[str, Any]:
         """List all endpoints in the endpoint map."""
         if not self.endpoint_map:
