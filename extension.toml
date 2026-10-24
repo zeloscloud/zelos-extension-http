@@ -12,7 +12,7 @@ readme = "README.md"
 changelog = "CHANGELOG.md"
 
 [zelos]
-version = ">=25.0.22-0"
+version = ">=26.0.9"
 
 [config]
 schema = "config.schema.json"
