@@ -6,7 +6,6 @@ sensor data that changes over time.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import math
 import random
@@ -177,15 +176,3 @@ class DemoServer:
             self._runner = None
             self._site = None
         logger.info("Demo HTTP server stopped")
-
-
-async def run_demo_server(host: str = "127.0.0.1", port: int = 8090) -> None:
-    """Run the demo HTTP server (blocking)."""
-    server = DemoServer(host=host, port=port)
-    await server.start()
-    try:
-        # Run forever
-        while True:
-            await asyncio.sleep(3600)
-    finally:
-        await server.stop()

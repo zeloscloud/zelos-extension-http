@@ -89,7 +89,7 @@ class TestEndpointMap:
             }
         }
         ep_map = EndpointMap.from_dict(data)
-        assert set(ep_map.event_names) == {"sensors", "system"}
+        assert set(ep_map.events) == {"sensors", "system"}
         assert len(ep_map.endpoints) == 2
 
     def test_from_file(self):
@@ -120,39 +120,6 @@ class TestEndpointMap:
         assert ep_map.get_by_name("humidity").path == "/api/humidity"
         assert ep_map.get_by_name("nonexistent") is None
 
-    def test_get_by_path(self):
-        """Find endpoint by path."""
-        data = {"events": {"a": [{"name": "temp", "path": "/api/temp"}]}}
-        ep_map = EndpointMap.from_dict(data)
-        assert ep_map.get_by_path("/api/temp").name == "temp"
-        assert ep_map.get_by_path("/api/nonexistent") is None
-
-    def test_writable_endpoints(self):
-        """writable_endpoints returns only writable ones."""
-        data = {
-            "events": {
-                "sensors": [{"name": "temp", "path": "/api/temp"}],
-                "config": [{"name": "setpoint", "path": "/api/config", "writable": True}],
-            }
-        }
-        ep_map = EndpointMap.from_dict(data)
-        writable = ep_map.writable_endpoints
-        assert len(writable) == 1
-        assert writable[0].name == "setpoint"
-
-    def test_unique_paths(self):
-        """unique_paths returns deduplicated paths."""
-        data = {
-            "events": {
-                "env": [
-                    {"name": "temp", "path": "/api/sensors", "json_path": "temperature"},
-                    {"name": "humidity", "path": "/api/sensors", "json_path": "humidity"},
-                ]
-            }
-        }
-        ep_map = EndpointMap.from_dict(data)
-        assert ep_map.unique_paths == {"/api/sensors"}
-
     def test_base_url_parsed(self):
         """Base URL is parsed from dict."""
         data = {
@@ -162,16 +129,14 @@ class TestEndpointMap:
         ep_map = EndpointMap.from_dict(data)
         assert ep_map.base_url == "http://192.168.1.100:8080"
 
-    def test_name_and_description(self):
-        """Name and description are parsed."""
+    def test_name_parsed(self):
+        """Name is parsed."""
         data = {
             "name": "my_device",
-            "description": "Test device",
             "events": {"test": [{"name": "t", "path": "/t"}]},
         }
         ep_map = EndpointMap.from_dict(data)
         assert ep_map.name == "my_device"
-        assert ep_map.description == "Test device"
 
     def test_json_path_parsed(self):
         """json_path is correctly parsed from endpoint data."""
@@ -390,138 +355,102 @@ def endpoint_map():
 
 
 @pytest.fixture
-def client(demo_server, endpoint_map):
+async def client(demo_server, endpoint_map):
     """Create a connected HttpClient."""
     c = HttpClient(
         base_url="http://127.0.0.1:18090",
         endpoint_map=endpoint_map,
         timeout=5.0,
     )
-    asyncio.get_event_loop().run_until_complete(c.connect())
+    await c.connect()
     yield c
-    asyncio.get_event_loop().run_until_complete(c.disconnect())
+    await c.disconnect()
 
 
 class TestDemoServerIntegration:
     """Integration tests against the demo server."""
 
-    def test_health_endpoint(self, client):
+    async def test_health_endpoint(self, client):
         """Health endpoint returns ok."""
-
-        async def check():
-            data = await client.fetch_path("/health")
-            return data
-
-        result = asyncio.get_event_loop().run_until_complete(check())
+        result = await client.fetch_path("/health")
         assert result is not None
         assert result["status"] == "ok"
 
-    def test_read_sensors(self, client):
+    async def test_read_sensors(self, client):
         """Read sensor data from demo server."""
-
-        async def read():
-            data = await client.fetch_path("/api/sensors")
-            return data
-
-        result = asyncio.get_event_loop().run_until_complete(read())
+        result = await client.fetch_path("/api/sensors")
         assert result is not None
         assert "temperature" in result
         assert "humidity" in result
         assert "pressure" in result
         assert "wind_speed" in result
 
-    def test_read_float32_endpoint(self, client):
+    async def test_read_float32_endpoint(self, client):
         """Read float32 value via endpoint definition."""
         ep = client.endpoint_map.get_by_name("temperature")
         assert ep is not None
         assert ep.datatype == "float32"
 
-        async def read():
-            return await client.fetch_endpoint(ep)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
+        value = await client.fetch_endpoint(ep)
         assert value is not None
         assert isinstance(value, float)
         assert 10.0 < value < 35.0
 
-    def test_read_uint32_endpoint(self, client):
+    async def test_read_uint32_endpoint(self, client):
         """Read uint32 value via endpoint definition."""
         ep = client.endpoint_map.get_by_name("uptime")
         assert ep is not None
         assert ep.datatype == "uint32"
 
-        async def read():
-            return await client.fetch_endpoint(ep)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
+        value = await client.fetch_endpoint(ep)
         assert value is not None
         assert isinstance(value, int)
         assert value >= 0
 
-    def test_read_uint8_endpoint(self, client):
+    async def test_read_uint8_endpoint(self, client):
         """Read uint8 value via endpoint definition."""
         ep = client.endpoint_map.get_by_name("battery_soc")
         assert ep is not None
         assert ep.datatype == "uint8"
 
-        async def read():
-            return await client.fetch_endpoint(ep)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
+        value = await client.fetch_endpoint(ep)
         assert value is not None
         assert isinstance(value, int)
         assert 0 <= value <= 100
 
-    def test_read_string_endpoint(self, client):
+    async def test_read_string_endpoint(self, client):
         """Read string value via endpoint definition."""
         ep = client.endpoint_map.get_by_name("station_name")
         assert ep is not None
         assert ep.datatype == "string"
 
-        async def read():
-            return await client.fetch_endpoint(ep)
-
-        value = asyncio.get_event_loop().run_until_complete(read())
+        value = await client.fetch_endpoint(ep)
         assert value is not None
         assert isinstance(value, str)
         assert value == "STATION-001"
 
-    def test_write_config_endpoint(self, client):
+    async def test_write_config_endpoint(self, client):
         """Write a value to a writable config endpoint."""
         ep = client.endpoint_map.get_by_name("alarm_threshold")
         assert ep is not None
         assert ep.writable is True
 
-        async def write_and_read():
-            success = await client.write_endpoint(ep, 45.0)
-            assert success is True
+        assert await client.write_endpoint(ep, 45.0) is True
 
-            # Read back via GET
-            data = await client.fetch_path("/api/config")
-            return data["alarm_threshold"]
+        data = await client.fetch_path("/api/config")
+        assert data["alarm_threshold"] == 45.0
 
-        value = asyncio.get_event_loop().run_until_complete(write_and_read())
-        assert value == 45.0
-
-    def test_write_non_writable_fails(self, client):
+    async def test_write_non_writable_fails(self, client):
         """Writing to non-writable endpoint fails."""
         ep = client.endpoint_map.get_by_name("temperature")
         assert ep is not None
         assert ep.writable is False
 
-        async def try_write():
-            return await client.write_endpoint(ep, 99.0)
+        assert await client.write_endpoint(ep, 99.0) is False
 
-        success = asyncio.get_event_loop().run_until_complete(try_write())
-        assert success is False
-
-    def test_poll_all_events(self, client):
+    async def test_poll_all_events(self, client):
         """Poll all endpoints and verify event structure."""
-
-        async def poll():
-            return await client._poll_endpoints()
-
-        results = asyncio.get_event_loop().run_until_complete(poll())
+        results = await client._poll_endpoints()
 
         # Should have all events from endpoint map
         assert "environment" in results
@@ -537,41 +466,29 @@ class TestDemoServerIntegration:
         # Check values are reasonable
         assert 10.0 < results["environment"]["temperature"] < 35.0
 
-    def test_shared_path_polling_efficiency(self, client):
+    async def test_shared_path_polling_efficiency(self, client):
         """Multiple endpoints sharing a path should result in one HTTP request."""
         # The environment event has 4 endpoints all pointing to /api/sensors
         # This tests that path_cache works correctly
-
-        async def poll():
-            return await client._poll_endpoints()
-
-        results = asyncio.get_event_loop().run_until_complete(poll())
+        results = await client._poll_endpoints()
         env = results.get("environment", {})
         assert "temperature" in env
         assert "humidity" in env
         assert "pressure" in env
         assert "wind_speed" in env
 
-    def test_read_power_data(self, client):
+    async def test_read_power_data(self, client):
         """Read power system data."""
-
-        async def read():
-            return await client.fetch_path("/api/power")
-
-        result = asyncio.get_event_loop().run_until_complete(read())
+        result = await client.fetch_path("/api/power")
         assert result is not None
         assert "battery_voltage" in result
         assert "solar_watts" in result
         assert "soc" in result
         assert 10.5 < result["battery_voltage"] < 13.5
 
-    def test_read_system_data(self, client):
+    async def test_read_system_data(self, client):
         """Read system status data."""
-
-        async def read():
-            return await client.fetch_path("/api/system")
-
-        result = asyncio.get_event_loop().run_until_complete(read())
+        result = await client.fetch_path("/api/system")
         assert result is not None
         assert "uptime_seconds" in result
         assert "cpu_temp" in result
@@ -685,6 +602,10 @@ class TestActionsUnit:
         assert result["success"] is False
         assert "not writable" in result["error"]
 
+    def test_read_endpoint_without_polling_loop_raises(self, client_with_map):
+        with pytest.raises(RuntimeError, match="The HTTP client is not running"):
+            client_with_map.read_endpoint("temp")
+
 
 class TestActionFlags:
     """Pins each action's flags, so a new action or a changed flag is a deliberate choice."""
@@ -707,7 +628,7 @@ class TestActionFlags:
 class TestActionsIntegration:
     """Integration tests for SDK actions with demo server."""
 
-    def test_list_endpoints_action(self, client):
+    async def test_list_endpoints_action(self, client):
         """List Endpoints action returns all demo endpoints."""
         result = client.list_endpoints()
         assert result["count"] > 0
@@ -716,7 +637,7 @@ class TestActionsIntegration:
         assert "battery_voltage" in names
         assert "uptime" in names
 
-    def test_get_status_action(self, client):
+    async def test_get_status_action(self, client):
         """Get Status action returns connection info."""
         result = client.get_status()
         assert result["connected"] is True

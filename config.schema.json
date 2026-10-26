@@ -58,9 +58,16 @@
       "type": "string",
       "title": "Log Level",
       "description": "Logging verbosity",
-      "enum": ["DEBUG", "INFO", "WARNING", "ERROR"],
+      "enum": [
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR"
+      ],
       "default": "INFO"
     }
   },
-  "required": ["base_url"]
+  "required": [
+    "base_url"
+  ]
 }

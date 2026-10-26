@@ -139,10 +139,6 @@ class HttpClient:
 
             self._source.add_event(event_name, fields)
 
-    def _get_sdk_datatype(self, datatype: str) -> zelos_sdk.DataType:
-        """Map endpoint datatype to Zelos SDK DataType."""
-        return SDK_DATATYPE_MAP.get(datatype, zelos_sdk.DataType.Float32)
-
     async def connect(self) -> bool:
         """Create HTTP session and verify connectivity."""
         try:
@@ -361,11 +357,11 @@ class HttpClient:
         Actions are called from SDK background threads, so we need to schedule
         async work on the running event loop via run_coroutine_threadsafe.
         """
-        if self._loop and self._loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-            return future.result(timeout=self.timeout + 1)
-        # Fallback if loop isn't running (e.g. tests)
-        return asyncio.run(coro)
+        if not (self._loop and self._loop.is_running()):
+            coro.close()
+            raise RuntimeError("The HTTP client is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(timeout=self.timeout + 1)
 
     async def _run_async(self) -> None:
         """Async polling loop with automatic reconnection."""
