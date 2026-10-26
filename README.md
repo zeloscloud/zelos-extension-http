@@ -35,11 +35,14 @@ All configuration is managed through the Zelos App settings interface.
 
 The extension provides several actions accessible from the Zelos App:
 
-- **Get Status**: View connection status, poll count, and error count
 - **Send Request**: Send an arbitrary HTTP request and display the response
-- **List Endpoints**: Browse all configured endpoints with their metadata
 - **Read Endpoint**: Read the current value of a single named endpoint
 - **Write Endpoint**: Write a value to a writable endpoint via PUT
+
+Two more actions stay out of the app's action list. Zelos AI can still run them to check the connection and look up endpoints:
+
+- **Get Status**: Connection status, poll count, and error count
+- **List Endpoints**: All configured endpoints with their metadata
 
 ## Endpoint Map Format
 
@@ -81,7 +84,7 @@ REST API polling is a technique for monitoring HTTP endpoints by periodically se
 
 ## Development
 
-Want to contribute or modify this extension? See [CLAUDE.md](CLAUDE.md) for the developer guide.
+Want to contribute or modify this extension? See [CONTRIBUTING.md](CONTRIBUTING.md) for the developer guide.
 
 ## CLI Usage
 

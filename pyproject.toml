@@ -1,7 +1,7 @@
 [project]
 name = "zelos-extension-http"
 version = "0.1.1"
-description = "HTTP/REST API polling extension for Zelos"
+description = "Poll HTTP and HTTPS REST APIs on an interval and record values from their JSON responses as signals. Write setpoints back with PUT, send one-off requests, and set auth headers."
 authors = [{ name = "Zelos", email = "support@zeloscloud.io" }]
 readme = "README.md"
 license = { text = "MIT" }
@@ -15,6 +15,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
     "zelos-sdk>=0.0.13a1",
@@ -26,21 +27,22 @@ dependencies = [
 Homepage = "https://github.com/zeloscloud/zelos-extension-http"
 Repository = "https://github.com/zeloscloud/zelos-extension-http"
 Issues = "https://github.com/zeloscloud/zelos-extension-http/issues"
+Documentation = "https://docs.zeloscloud.io/app/extensions/"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
-    "pytest>=8.4.2",
+    "pytest>=9.1.1",
     "pytest-asyncio>=0.24.0",
-    "pre-commit>=4.3.0",
-    "ruff>=0.14.2",
+    "pre-commit>=4.6.2",
+    "ruff>=0.16.10",
 ]
-
-[project.scripts]
-zelos-extension-http = "main:cli"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv]
+required-version = ">=0.9.5"
 
 [tool.hatch.build.targets.wheel]
 packages = ["zelos_extension_http"]
@@ -52,7 +54,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
-target-version = "py311"
+target-version = 'py311'
 line-length = 100
 
 [tool.ruff.lint]
@@ -69,6 +71,3 @@ select = [
 ignore = [
     "B008",   # function call in defaults (common in decorators)
 ]
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
