@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import threading
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import zelos_sdk
-from zelos_sdk.extensions import load_config
+from zelos_sdk.extensions import ConfigValidationError, load_config
 from zelos_sdk.hooks.logging import TraceLoggingHandler
 
 from zelos_extension_http.client import HttpClient
@@ -60,7 +61,11 @@ def start_demo_server() -> None:
 
 def run_app_mode(demo: bool = False) -> None:
     """Run the extension in app mode with configuration from Zelos App."""
-    config = load_config()
+    try:
+        config = load_config()
+    except ConfigValidationError as e:
+        logger.error("Invalid configuration: %s", "; ".join(m.strip(" •") for m in e.errors))
+        sys.exit(1)
 
     if demo or config.get("demo", False):
         logger.info("Demo mode: using built-in weather station simulator")
