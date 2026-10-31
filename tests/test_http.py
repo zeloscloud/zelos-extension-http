@@ -380,6 +380,14 @@ class TestDemoServerIntegration:
         assert result is not None
         assert result["status"] == "ok"
 
+    async def test_requests_log_no_access_lines(self, client, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            assert await client.fetch_path("/api/sensors") is not None
+            await asyncio.sleep(0.2)
+        assert [r.name for r in caplog.records if r.name.startswith("aiohttp")] == []
+
     async def test_read_sensors(self, client):
         """Read sensor data from demo server."""
         result = await client.fetch_path("/api/sensors")
