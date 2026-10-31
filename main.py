@@ -61,9 +61,6 @@ def cli(ctx: click.Context, demo: bool) -> None:
 
 def run_app_mode(demo: bool = False) -> None:
     """Run in app mode with Zelos SDK initialization."""
-    handler = TraceLoggingHandler("zelos_extension_http_logger")
-    logging.getLogger().addHandler(handler)
-
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
@@ -118,9 +115,6 @@ def trace(
     from zelos_extension_http.client import HttpClient
     from zelos_extension_http.endpoint_map import EndpointMap
 
-    handler = TraceLoggingHandler("zelos_extension_http_logger")
-    logging.getLogger().addHandler(handler)
-
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
@@ -154,6 +148,7 @@ def trace(
 
     logger.info(f"Starting HTTP trace: {base_url}")
     _client.start()
+    logging.getLogger().addHandler(TraceLoggingHandler(_client.source))
     _client.run()
 
 

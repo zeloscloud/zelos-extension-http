@@ -114,12 +114,12 @@ class HttpClient:
         self._loop: asyncio.AbstractEventLoop | None = None
 
         # Zelos SDK trace source
-        self._source: zelos_sdk.TraceSourceCacheLast | None = None
+        self.source: zelos_sdk.TraceSourceCacheLast | None = None
 
     def _init_trace_source(self) -> None:
         """Initialize Zelos trace source from endpoint map."""
         source_name = self.endpoint_map.name if self.endpoint_map else "http"
-        self._source = zelos_sdk.TraceSourceCacheLast(source_name)
+        self.source = zelos_sdk.TraceSourceCacheLast(source_name)
 
         if not self.endpoint_map or not self.endpoint_map.events:
             return
@@ -137,7 +137,7 @@ class HttpClient:
                     dtype = SDK_DATATYPE_MAP.get(ep.datatype, zelos_sdk.DataType.Float32)
                 fields.append(zelos_sdk.TraceEventFieldMetadata(ep.name, dtype, ep.unit))
 
-            self._source.add_event(event_name, fields)
+            self.source.add_event(event_name, fields)
 
     async def connect(self) -> bool:
         """Create HTTP session and verify connectivity."""
@@ -309,14 +309,14 @@ class HttpClient:
 
     async def _log_values(self, values: dict[str, dict[str, Any]]) -> None:
         """Log polled values to Zelos trace source."""
-        if not self._source:
+        if not self.source:
             return
 
         for event_name, event_values in values.items():
             if not event_values:
                 continue
 
-            event = getattr(self._source, event_name, None)
+            event = getattr(self.source, event_name, None)
             if event:
                 # Filter out string values from trace logging
                 numeric_values = {k: v for k, v in event_values.items() if not isinstance(v, str)}
