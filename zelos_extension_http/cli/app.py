@@ -115,7 +115,7 @@ def run_app_mode(demo: bool = False) -> None:
     client = HttpClient(**client_kwargs)
 
     zelos_sdk.actions_registry.register(client)
-    zelos_sdk.init(name="zelos_extension_http", actions=True)
+    zelos_sdk.init(name="HTTP", actions=True)
 
     # Start and run
     client.start()

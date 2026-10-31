@@ -151,7 +151,7 @@ def trace(
     )
 
     zelos_sdk.actions_registry.register(_client)
-    zelos_sdk.init(name="zelos_extension_http", actions=True)
+    zelos_sdk.init(name="HTTP", actions=True)
 
     logger.info(f"Starting HTTP trace: {base_url}")
     _client.start()

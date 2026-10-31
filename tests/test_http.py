@@ -741,3 +741,23 @@ class TestEndToEndLifecycle:
         assert result["error_count"] == 0
         assert result["last_status_code"] == 200
         assert result["endpoints"] == 13
+
+
+def test_actions_register_under_the_manifest_name(monkeypatch):
+    import tomllib
+    from types import SimpleNamespace
+
+    from zelos_extension_http.cli import app
+
+    names: list[str | None] = []
+    sdk = SimpleNamespace(
+        actions_registry=SimpleNamespace(register=lambda _client: None),
+        init=lambda name=None, **_kwargs: names.append(name),
+    )
+    monkeypatch.setattr(app, "zelos_sdk", sdk)
+    monkeypatch.setattr(app, "load_config", dict)
+    monkeypatch.setattr(HttpClient, "start", lambda self: None)
+    monkeypatch.setattr(HttpClient, "run", lambda self: None)
+    app.run_app_mode()
+    manifest = tomllib.loads((Path(__file__).parents[1] / "extension.toml").read_text())
+    assert names == [manifest["name"]]
