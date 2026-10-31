@@ -1,26 +1,24 @@
 name = "HTTP"
 version = "0.1.1"
-description = "HTTP/REST API polling extension for Zelos - monitor and interact with REST endpoints"
+description = "Poll HTTP and HTTPS REST APIs on an interval and record values from their JSON responses as signals. Write setpoints back with PUT, send one-off requests, and set auth headers."
 author = "Zelos"
 repository = "https://github.com/zeloscloud/zelos-extension-http"
-homepage = "https://github.com/zeloscloud/zelos-extension-http"
-keywords = ["http", "rest", "api", "iot", "monitoring"]
-categories = ["IoT", "Networking", "Monitoring"]
-
+# The marketplace search and Zelos AI find an extension by these words, its name and its description.
+keywords = ["http", "rest", "api", "iot", "monitoring", "rest api", "web api", "json path", "polling", "get request", "post request", "put request", "bearer token", "api key", "authorization", "ssl", "http client", "web service", "gateway", "setpoint"]
+categories = ["IoT", "Networking", "Monitoring", "Industrial"]
 icon = "assets/icon.svg"
 readme = "README.md"
-changelog = "CHANGELOG.md"
 
 [zelos]
-version = ">=26.0.9"
+version = ">=26.0.10"
 
 [config]
 schema = "config.schema.json"
 
-[runtime]
-type = "python"
+[agent]
+runtime = "python"
 entry = "main.py"
 python_version = "3.11"
 
-[stop]
-grace_seconds = 10
+[package]
+paths = ["main.py", "zelos_extension_http", "CHANGELOG.md"]

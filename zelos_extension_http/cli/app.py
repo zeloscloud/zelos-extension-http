@@ -29,7 +29,7 @@ def get_demo_endpoint_map_path() -> Path:
         return path
 
 
-def start_demo_server() -> threading.Thread:
+def start_demo_server() -> None:
     """Start the demo HTTP server in a background thread."""
     from zelos_extension_http.demo.simulator import DemoServer
 
@@ -56,8 +56,6 @@ def start_demo_server() -> threading.Thread:
 
     time.sleep(0.5)
 
-    return thread
-
 
 def run_app_mode(demo: bool = False) -> None:
     """Run the extension in app mode with configuration from Zelos App."""
@@ -65,7 +63,7 @@ def run_app_mode(demo: bool = False) -> None:
 
     if demo or config.get("demo", False):
         logger.info("Demo mode: using built-in weather station simulator")
-        _server_thread = start_demo_server()
+        start_demo_server()
 
         config["base_url"] = f"http://{DEMO_HOST}:{DEMO_PORT}"
         demo_map_path = get_demo_endpoint_map_path()
@@ -116,11 +114,8 @@ def run_app_mode(demo: bool = False) -> None:
 
     client = HttpClient(**client_kwargs)
 
-    # Register actions BEFORE init() — SDK requires this ordering
     zelos_sdk.actions_registry.register(client)
-
-    # Initialize SDK (must be called after actions are registered)
-    zelos_sdk.init(name="zelos_extension_http", actions=True)
+    zelos_sdk.init(name="HTTP", actions=True)
 
     # Start and run
     client.start()

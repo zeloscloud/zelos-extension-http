@@ -44,12 +44,6 @@ def shutdown_handler(signum: int, frame: FrameType | None) -> None:
     sys.exit(0)
 
 
-def set_shutdown_client(client: HttpClient) -> None:
-    """Set the client for shutdown handling."""
-    global _client
-    _client = client
-
-
 @click.group(invoke_without_command=True)
 @click.option("--demo", is_flag=True, help="Run in demo mode with simulated weather station")
 @click.pass_context
@@ -62,20 +56,12 @@ def cli(ctx: click.Context, demo: bool) -> None:
     Use --demo flag or 'demo' subcommand for simulated weather station.
     Use 'trace' subcommand for direct CLI access without Zelos App.
     """
-    ctx.ensure_object(dict)
-    ctx.obj["shutdown_handler"] = set_shutdown_client
-    ctx.obj["demo"] = demo
-
     if ctx.invoked_subcommand is None:
-        run_app_mode(ctx, demo=demo)
+        run_app_mode(demo=demo)
 
 
-def run_app_mode(ctx: click.Context, demo: bool = False) -> None:
-    """Run in app mode with Zelos SDK initialization.
-
-    Note: zelos_sdk.init() is called inside cli/app.py AFTER actions are registered,
-    because the SDK requires actions to be registered before init().
-    """
+def run_app_mode(demo: bool = False) -> None:
+    """Run in app mode with Zelos SDK initialization."""
     handler = TraceLoggingHandler("zelos_extension_http_logger")
     logging.getLogger().addHandler(handler)
 
@@ -88,8 +74,7 @@ def run_app_mode(ctx: click.Context, demo: bool = False) -> None:
 
 
 @cli.command()
-@click.pass_context
-def demo(ctx: click.Context) -> None:
+def demo() -> None:
     """Run demo mode with simulated weather station.
 
     Starts a local HTTP server with simulated sensor data
@@ -101,7 +86,7 @@ def demo(ctx: click.Context) -> None:
     - System status (CPU, memory, uptime)
     - Writable configuration endpoints
     """
-    run_app_mode(ctx, demo=True)
+    run_app_mode(demo=True)
 
 
 @cli.command()
@@ -110,9 +95,7 @@ def demo(ctx: click.Context) -> None:
 @click.option("--interval", "-i", type=float, default=1.0, help="Poll interval in seconds")
 @click.option("--timeout", type=float, default=5.0, help="Request timeout in seconds")
 @click.option("--header", "-H", multiple=True, help="Custom header (Key: Value)")
-@click.pass_context
 def trace(
-    ctx: click.Context,
     base_url: str,
     endpoint_map_file: str | None,
     interval: float,
@@ -167,9 +150,8 @@ def trace(
         headers=headers,
     )
 
-    # Register actions BEFORE init() — SDK requires this ordering
     zelos_sdk.actions_registry.register(_client)
-    zelos_sdk.init(name="zelos_extension_http", actions=True)
+    zelos_sdk.init(name="HTTP", actions=True)
 
     logger.info(f"Starting HTTP trace: {base_url}")
     _client.start()

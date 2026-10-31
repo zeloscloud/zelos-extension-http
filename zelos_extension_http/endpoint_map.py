@@ -60,8 +60,6 @@ class Endpoint:
     json_path: str = ""
     scale: float = 1.0
     writable: bool = False
-    description: str = ""
-    body: str = ""
 
     def __post_init__(self) -> None:
         """Validate endpoint definition."""
@@ -81,7 +79,6 @@ class EndpointMap:
     events: dict[str, list[Endpoint]] = field(default_factory=dict)
     name: str = "http"
     base_url: str = ""
-    description: str = ""
 
     @classmethod
     def from_file(cls, path: str | Path) -> EndpointMap:
@@ -112,8 +109,6 @@ class EndpointMap:
                     json_path=ep_data.get("json_path", ""),
                     scale=ep_data.get("scale", 1.0),
                     writable=ep_data.get("writable", False),
-                    description=ep_data.get("description", ""),
-                    body=ep_data.get("body", ""),
                 )
                 endpoints.append(ep)
             events[event_name] = endpoints
@@ -122,7 +117,6 @@ class EndpointMap:
             events=events,
             name=data.get("name", "http"),
             base_url=data.get("base_url", ""),
-            description=data.get("description", ""),
         )
 
     @property
@@ -133,15 +127,6 @@ class EndpointMap:
             all_eps.extend(eps)
         return all_eps
 
-    @property
-    def event_names(self) -> list[str]:
-        """List of all event names."""
-        return list(self.events.keys())
-
-    def get_event(self, event_name: str) -> list[Endpoint]:
-        """Get all endpoints for an event."""
-        return self.events.get(event_name, [])
-
     def get_by_name(self, name: str) -> Endpoint | None:
         """Find endpoint by name across all events."""
         for eps in self.events.values():
@@ -149,21 +134,3 @@ class EndpointMap:
                 if ep.name == name:
                     return ep
         return None
-
-    def get_by_path(self, path: str) -> Endpoint | None:
-        """Find endpoint by path across all events."""
-        for eps in self.events.values():
-            for ep in eps:
-                if ep.path == path:
-                    return ep
-        return None
-
-    @property
-    def writable_endpoints(self) -> list[Endpoint]:
-        """Flat list of all writable endpoints."""
-        return [ep for ep in self.endpoints if ep.writable]
-
-    @property
-    def unique_paths(self) -> set[str]:
-        """Set of unique endpoint paths (for efficient polling)."""
-        return {ep.path for ep in self.endpoints}

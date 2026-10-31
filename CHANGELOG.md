@@ -7,31 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Needs Zelos 26.0.10 or later.
+- Get Status and List Endpoints are read-only and stay out of the app's action list. They still run by name.
+- Actions are addressed under the extension's name: `HTTP/...` instead of `zelos_extension_http/...`.
+
+## [0.1.1] - 2026-03-02
+
 ### Added
 - Initial implementation
-
-### Changed
-- N/A
-
-### Deprecated
-- N/A
-
-### Removed
-- N/A
-
-### Fixed
-- N/A
-
-### Security
-- N/A
-
----
-
-*For maintainers: When releasing, move items from [Unreleased] to a new version section:*
-
-```markdown
-## [0.1.0] - 2026-03-01
-
-### Added
-- (move items from Unreleased here)
-```

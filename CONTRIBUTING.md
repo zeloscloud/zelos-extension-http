@@ -1,120 +1,97 @@
 # Contributing
 
-## First Commit
+## Prerequisites
 
-All files are staged and ready. Create your first commit:
+- [Zelos](https://zeloscloud.io) 26.0.10 or later
+- [Zelos CLI](https://docs.zeloscloud.io/reference/cli/) 0.1.11 or later
+- [just](https://github.com/casey/just)
+- [uv](https://docs.astral.sh/uv/)
+
+## Layout
+
+`extension.toml` describes everything the extension contributes:
+
+| Part | Files | Manifest |
+| ---- | ----- | -------- |
+| Agent runtime | `main.py`, the Python package, `pyproject.toml`, `config.schema.json` | `[agent]`, `[config]` |
+
+The Python package:
+
+| File | Contents |
+| ---- | -------- |
+| `main.py` | CLI: app mode (default), `demo` and `trace` |
+| `zelos_extension_http/client.py` | `HttpClient`: polls endpoints, writes trace events, serves the actions |
+| `zelos_extension_http/endpoint_map.py` | `Endpoint` and `EndpointMap`: events, paths and JSON paths |
+| `zelos_extension_http/cli/app.py` | App mode: reads the config and starts the client |
+| `zelos_extension_http/demo/simulator.py` | The weather station server that demo mode polls |
+| `zelos_extension_http/demo/demo_device.json` | The endpoint map for the simulator |
+| `tests/test_http.py` | Unit tests, and integration tests against the simulator |
+
+## Commands
+
+| Command                | Description                                        |
+| ---------------------- | -------------------------------------------------- |
+| `just install`         | Install dependencies and the pre-commit hooks      |
+| `just format`          | Format code with ruff                              |
+| `just check`           | Check formatting and lint (ruff)                   |
+| `just test`            | Run tests (pytest)                                 |
+| `just package`         | Package for the Zelos marketplace                  |
+| `just release VERSION` | Bump version, check, test, commit, tag             |
+| `just clean`           | Remove build output, caches and packages           |
+
+`just --list` also shows the recipes each part adds. `just install` installs the
+pre-commit hooks in `.pre-commit-config.yaml`.
+
+The tests start the simulator on localhost and poll it with the real client. They need no
+network.
+
+## Run it in Zelos
 
 ```bash
-git commit -m "Initial commit"
+zelos extensions install-local .
+zelos extensions start local.http --config '{"base_url": "http://127.0.0.1:8090", "demo": true}'
+zelos extensions logs local.http
 ```
 
-## Push to GitHub
+A local install runs from your project directory, so you do not install again after a code
+change:
 
-Create a repository on GitHub, then:
+- Agent runtime: stop and start the extension. After a dependency change, stop it and run
+  `zelos extensions reinstall <id>`.
+- `extension.toml`: run `zelos extensions install-local .` again.
+
+Demo mode starts the weather station simulator on `127.0.0.1:8090` and polls it, so it needs
+no server. To run without the agent's extension manager:
 
 ```bash
-git remote add origin git@github.com:zeloscloud/zelos-extension-http.git
-git push -u origin main
+echo '{"base_url": "http://127.0.0.1:8090", "demo": true}' > config.json
+just run                                                      # app mode, reads ./config.json
+uv run python main.py demo                                    # demo mode, needs no config.json
+uv run python main.py trace http://host:8080 endpoints.json   # poll a real server
 ```
 
-## Development Workflow
+These connect to the agent at `ZELOS_AGENT_URL`, else `http://localhost:2300`.
 
-```bash
-just install  # Install dependencies and setup
-just dev      # Run locally
-just test     # Run tests
-just check    # Lint code
-```
-
-1. Make your changes
-2. Run `just format` to auto-format
-3. Run `just test` to verify tests pass
-4. Commit your changes (pre-commit hooks run automatically)
-
-## Common Tasks
-
-### Run Locally
-
-```bash
-just dev
-```
-
-Press Ctrl+C to stop.
-
-### Add a Dependency
-
-```bash
-uv add package-name        # Runtime dependency
-uv add --dev package-name  # Dev dependency
-```
-
-### Package for Marketplace
+## Packaging
 
 ```bash
 just package
 ```
 
-This creates a `.tar.gz` file ready to upload to the Zelos Marketplace (automatically happens in CI!)
+The archive lands next to `extension.toml` as `<name>-<version>.tar.gz`, where `<name>` is the
+manifest name in lowercase with every other run of characters turned into one hyphen. It holds
+`extension.toml`, the README, the icon, the config schema and the paths listed in
+`[package] paths`. With an agent runtime it also holds `pyproject.toml`, `uv.lock` and
+`actions.json`, the list of actions that run while the extension is stopped.
 
-### Create a Release
+## Release
+
+Add the release to `CHANGELOG.md` and commit it, then:
 
 ```bash
 just release 1.0.0
 git push --follow-tags
 ```
 
-This updates version numbers, runs tests, and creates a git tag.
-
-## Testing
-
-### Write Tests
-
-```python
-# tests/test_http.py
-from zelos_extension_http.client import HttpClient
-
-def test_something():
-    client = HttpClient(base_url="http://localhost:8080")
-    assert client is not None
-```
-
-### Run Tests
-
-```bash
-just test           # Run all tests
-uv run pytest -v    # Verbose output
-uv run pytest -k test_name  # Run specific test
-```
-
-## Code Quality
-
-### Formatting & Linting
-
-```bash
-just format  # Auto-fix formatting
-just check   # Check for issues
-```
-
-Pre-commit hooks run automatically on `git commit` and will:
-- Format code with ruff
-- Check for common issues
-- Validate YAML/TOML/JSON files
-
-### Type Hints
-
-Use type hints on all function signatures:
-
-```python
-def my_function(name: str, count: int) -> list[str]:
-    return [name] * count
-```
-
-## Getting Help
-
-- [Zelos Docs](https://docs.zeloscloud.io)
-- [SDK Guide](https://docs.zeloscloud.io/sdk)
-- [GitHub Issues](https://github.com/zeloscloud/zelos-extension-http/issues)
-
-## License
-
-MIT - see [LICENSE](LICENSE)
+The release workflow checks, tests and packages the extension, then attaches the archive to a
+GitHub release.
