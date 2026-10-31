@@ -148,6 +148,10 @@ class TestEndpointMap:
         ep_map = EndpointMap.from_dict(data)
         assert ep_map.endpoints[0].json_path == "data.temperature"
 
+    def test_log_event_name_is_reserved(self):
+        with pytest.raises(ValueError, match="'log' is reserved"):
+            EndpointMap.from_dict({"events": {"log": [{"name": "t", "path": "/t"}]}})
+
 
 # =============================================================================
 # JSON Extraction & Coercion Tests
@@ -699,7 +703,7 @@ class TestEndToEndLifecycle:
 
     def test_trace_source_initialized(self, polling_client):
         """Trace source has correct events from endpoint map."""
-        src = polling_client._source
+        src = polling_client.source
         assert src is not None
         assert getattr(src, "environment", None) is not None
         assert getattr(src, "power", None) is not None
@@ -741,3 +745,31 @@ class TestEndToEndLifecycle:
         assert result["error_count"] == 0
         assert result["last_status_code"] == 200
         assert result["endpoints"] == 13
+
+
+def test_logs_record_on_the_data_source(monkeypatch):
+    import logging
+    from types import SimpleNamespace
+
+    from zelos_sdk.hooks.logging import TraceLoggingHandler
+
+    from zelos_extension_http.cli import app
+
+    clients: list[HttpClient] = []
+    sdk = SimpleNamespace(
+        actions_registry=SimpleNamespace(register=clients.append),
+        init=lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(app, "zelos_sdk", sdk)
+    monkeypatch.setattr(app, "load_config", dict)
+    monkeypatch.setattr(HttpClient, "run", lambda self: None)
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        app.run_app_mode()
+        added = [h for h in root.handlers if h not in before]
+    finally:
+        for handler in [h for h in root.handlers if h not in before]:
+            root.removeHandler(handler)
+    assert [type(h) for h in added] == [TraceLoggingHandler]
+    assert added[0].trace_source is clients[0].source

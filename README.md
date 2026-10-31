@@ -46,7 +46,7 @@ Two more actions stay out of the app's action list. Zelos AI can still run them 
 
 ## Endpoint Map Format
 
-The endpoint map defines which URLs to poll and how to extract values from JSON responses. Endpoints are grouped into events, which become Zelos trace events.
+The endpoint map defines which URLs to poll and how to extract values from JSON responses. Endpoints are grouped into events, which become Zelos trace events. The extension's logs record as a `log` event on the same source, so `log` is not available as an event name.
 
 ```json
 {

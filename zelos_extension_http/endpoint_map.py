@@ -15,6 +15,7 @@ The endpoint map format uses user-defined events to group endpoints semantically
 }
 
 Event names become Zelos trace events. Endpoint names become fields.
+The event name "log" is reserved for the extension's logs.
 
 Required fields per endpoint: name, path
 Optional: method (GET), datatype (float32), unit, json_path, scale, writable
@@ -98,6 +99,8 @@ class EndpointMap:
         events: dict[str, list[Endpoint]] = {}
 
         for event_name, endpoints_data in data.get("events", {}).items():
+            if event_name == "log":
+                raise ValueError("Event name 'log' is reserved for the extension's logs")
             endpoints = []
             for ep_data in endpoints_data:
                 ep = Endpoint(

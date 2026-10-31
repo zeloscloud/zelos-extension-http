@@ -11,6 +11,7 @@ from typing import Any
 
 import zelos_sdk
 from zelos_sdk.extensions import load_config
+from zelos_sdk.hooks.logging import TraceLoggingHandler
 
 from zelos_extension_http.client import HttpClient
 from zelos_extension_http.endpoint_map import EndpointMap
@@ -119,4 +120,5 @@ def run_app_mode(demo: bool = False) -> None:
 
     # Start and run
     client.start()
+    logging.getLogger().addHandler(TraceLoggingHandler(client.source))
     client.run()
