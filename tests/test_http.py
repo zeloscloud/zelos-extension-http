@@ -725,6 +725,21 @@ class TestEndToEndLifecycle:
         assert isinstance(result["value"], float)
         assert 10.0 < result["value"] < 35.0
 
+    def test_send_request_runs_without_a_body(self, polling_client):
+        from zelos_sdk.actions import ActionsRegistry
+
+        registry = ActionsRegistry()
+        registry.register(polling_client)
+        result = registry.execute(
+            "HttpClient/send_request", {"path": "/api/sensors", "method": "GET"}
+        )
+        assert result.value["status_code"] == 200
+        result = registry.execute(
+            "HttpClient/send_request",
+            {"path": "/api/config", "method": "PUT", "body": '{"station_name": "Roof"}'},
+        )
+        assert result.value["response"]["updated"] == {"station_name": "Roof"}
+
     def test_send_request_during_polling(self, polling_client):
         """Send Request action works cross-thread during active polling."""
         result = polling_client.send_request("/api/sensors", "GET", "")

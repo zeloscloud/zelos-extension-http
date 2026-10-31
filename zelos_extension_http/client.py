@@ -434,7 +434,9 @@ class HttpClient:
         default="GET",
         title="HTTP Method",
     )
-    @zelos_sdk.action.text("body", title="Request Body (JSON, optional)")
+    @zelos_sdk.action.text(
+        "body", title="Request Body (JSON, optional)", required=False, default=""
+    )
     def send_request(self, path: str, method: str, body: str) -> dict[str, Any]:
         """Send an arbitrary HTTP request."""
         url = self.base_url + path
