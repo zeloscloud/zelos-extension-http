@@ -163,7 +163,7 @@ class DemoServer:
     async def start(self) -> None:
         """Start the server."""
         app = self._create_app()
-        self._runner = web.AppRunner(app)
+        self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.host, self.port)
         await self._site.start()

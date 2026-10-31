@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Logs record as a `log` event next to the polled values, on the endpoint map's source (`http` without a map), instead of on a separate `zelos_extension_http_logger` source. An endpoint map event can no longer be named `log`.
+- Demo mode no longer writes an aiohttp access line to the log for every request the simulator serves.
 
 ## [0.1.1] - 2026-03-02
 
