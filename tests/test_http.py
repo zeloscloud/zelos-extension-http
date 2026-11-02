@@ -1,815 +1,249 @@
-"""Tests for Zelos HTTP extension.
+"""Servers end to end against the in-process weather station simulator."""
 
-Tests core functionality:
-- Endpoint map parsing
-- JSON value extraction and coercion
-- Simulator physics logic
-- Integration tests with demo server
-"""
+from __future__ import annotations
 
 import asyncio
-import json
-import tempfile
-from pathlib import Path
+import logging
+import ssl
+import time
 
+import aiohttp
 import pytest
+import trustme
+from aiohttp import web
+from conftest import DEMO_MAP, clients_for, closed_port, logged, running, wait_until
 
-from zelos_extension_http.client import (
-    HttpClient,
-    coerce_value,
-    extract_json_value,
-)
-from zelos_extension_http.demo.simulator import DemoServer, WeatherStationSimulator
-from zelos_extension_http.endpoint_map import Endpoint, EndpointMap
+from zelos_extension_http import actions
+from zelos_extension_http.autoconfig import NO_SERVERS
+from zelos_extension_http.client import SHUTDOWN_TIMEOUT, HttpClient, HttpRunner
+from zelos_extension_http.demo.simulator import DemoServer
+from zelos_extension_http.endpoint_map import EndpointMap
 
-# =============================================================================
-# Endpoint Map Tests
-# =============================================================================
-
-
-class TestEndpoint:
-    """Test Endpoint dataclass."""
-
-    def test_defaults(self):
-        """Minimal required fields use sensible defaults."""
-        ep = Endpoint(path="/api/test", name="test")
-        assert ep.method == "GET"
-        assert ep.datatype == "float32"
-        assert ep.writable is False
-
-    def test_invalid_datatype_raises(self):
-        """Invalid datatype raises ValueError."""
-        with pytest.raises(ValueError, match="Invalid datatype"):
-            Endpoint(path="/api/test", name="test", datatype="invalid")
-
-    def test_invalid_method_raises(self):
-        """Invalid HTTP method raises ValueError."""
-        with pytest.raises(ValueError, match="Invalid method"):
-            Endpoint(path="/api/test", name="test", method="INVALID")
-
-    def test_method_uppercased(self):
-        """Method is normalized to uppercase."""
-        ep = Endpoint(path="/api/test", name="test", method="get")
-        assert ep.method == "GET"
-
-    def test_valid_datatypes(self):
-        """All valid datatypes are accepted."""
-        for dt in [
-            "bool",
-            "uint8",
-            "int8",
-            "uint16",
-            "int16",
-            "uint32",
-            "int32",
-            "float32",
-            "uint64",
-            "int64",
-            "float64",
-            "string",
-        ]:
-            ep = Endpoint(path="/test", name="t", datatype=dt)
-            assert ep.datatype == dt
-
-    def test_writable_endpoint(self):
-        """Writable flag is set correctly."""
-        ep = Endpoint(path="/api/config", name="setpoint", writable=True)
-        assert ep.writable is True
+PATHS = ["/api/sensors", "/api/power"]
 
 
-class TestEndpointMap:
-    """Test EndpointMap parsing."""
-
-    def test_from_dict_creates_events(self):
-        """Events are correctly parsed from dict."""
-        data = {
-            "events": {
-                "sensors": [{"name": "temp", "path": "/api/temp"}],
-                "system": [{"name": "uptime", "path": "/api/uptime"}],
-            }
-        }
-        ep_map = EndpointMap.from_dict(data)
-        assert set(ep_map.events) == {"sensors", "system"}
-        assert len(ep_map.endpoints) == 2
-
-    def test_from_file(self):
-        """Endpoint map loads from JSON file."""
-        data = {"events": {"test": [{"name": "val", "path": "/api/val"}]}}
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(data, f)
-            f.flush()
-            ep_map = EndpointMap.from_file(f.name)
-        assert len(ep_map.endpoints) == 1
-        Path(f.name).unlink()
-
-    def test_from_file_not_found(self):
-        """Missing file raises FileNotFoundError."""
-        with pytest.raises(FileNotFoundError):
-            EndpointMap.from_file("/nonexistent/file.json")
-
-    def test_get_by_name(self):
-        """Find endpoint by name across events."""
-        data = {
-            "events": {
-                "a": [{"name": "temp", "path": "/api/temp"}],
-                "b": [{"name": "humidity", "path": "/api/humidity"}],
-            }
-        }
-        ep_map = EndpointMap.from_dict(data)
-        assert ep_map.get_by_name("temp").path == "/api/temp"
-        assert ep_map.get_by_name("humidity").path == "/api/humidity"
-        assert ep_map.get_by_name("nonexistent") is None
-
-    def test_base_url_parsed(self):
-        """Base URL is parsed from dict."""
-        data = {
-            "base_url": "http://192.168.1.100:8080",
-            "events": {"test": [{"name": "t", "path": "/api/t"}]},
-        }
-        ep_map = EndpointMap.from_dict(data)
-        assert ep_map.base_url == "http://192.168.1.100:8080"
-
-    def test_name_parsed(self):
-        """Name is parsed."""
-        data = {
-            "name": "my_device",
-            "events": {"test": [{"name": "t", "path": "/t"}]},
-        }
-        ep_map = EndpointMap.from_dict(data)
-        assert ep_map.name == "my_device"
-
-    def test_json_path_parsed(self):
-        """json_path is correctly parsed from endpoint data."""
-        data = {
-            "events": {
-                "env": [{"name": "temp", "path": "/api/sensors", "json_path": "data.temperature"}]
-            }
-        }
-        ep_map = EndpointMap.from_dict(data)
-        assert ep_map.endpoints[0].json_path == "data.temperature"
-
-    def test_log_event_name_is_reserved(self):
-        with pytest.raises(ValueError, match="'log' is reserved"):
-            EndpointMap.from_dict({"events": {"log": [{"name": "t", "path": "/t"}]}})
+async def test_unreachable_at_start_stops_the_extension(sim, caplog):
+    """First contact is required: a closed port stops every server with one ERROR."""
+    gone = f"http://127.0.0.1:{closed_port()}"
+    runner = HttpRunner(
+        clients_for(
+            [
+                {"name": "wx", "base_url": sim.url, "paths": PATHS},
+                {"name": "gone", "base_url": gone, "paths": PATHS},
+            ]
+        )
+    )
+    await asyncio.wait_for(runner._run_async(), 10.0)
+    assert logged(caplog, logging.ERROR) == [
+        f"Server 'gone' ({gone}): cannot connect: connection refused; check the Base URL and "
+        "that the server is running, then start the extension again"
+    ]
+    assert runner.failed_at_start == [runner.clients["gone"]]
+    assert runner.clients["wx"].reachable
 
 
-# =============================================================================
-# JSON Extraction & Coercion Tests
-# =============================================================================
+async def test_retry_unreachable_then_outage_backs_off_and_recovers(caplog):
+    """With retry, a server absent at start is polled once it appears; an outage after that
+    warns once, backs off, and recovers on the same port."""
+    caplog.set_level(logging.INFO)
+    port = closed_port()
+    (client,) = clients_for(
+        [{"name": "late", "base_url": f"http://127.0.0.1:{port}", "paths": PATHS}]
+    )
+    client.poll_interval = 0.1
+    async with running(HttpRunner([client], retry_unreachable=True)):
+        await wait_until(client.contacted.is_set, 5.0)
+        assert logged(caplog, logging.ERROR) == [
+            f"Server 'late' (http://127.0.0.1:{port}): cannot connect: connection refused; "
+            "retrying with backoff while the other servers poll"
+        ]
+        async with DemoServer(port=port):
+            await wait_until(lambda: client.reachable, 5.0)  # the first backoff is 3 s
+            polled = client.poll_count
+            await wait_until(lambda: client.poll_count >= polled + 3, 5.0)
+        await wait_until(lambda: not client.reachable, 5.0)
+        async with DemoServer(port=port):
+            await wait_until(lambda: client.reachable, 5.0)
+    assert logged(caplog, logging.WARNING) == [
+        "[late] Unreachable: connection refused; retrying with backoff"
+    ]
+    assert "[late] Reachable again" in logged(caplog, logging.INFO)
 
 
-class TestExtractJsonValue:
-    """Test JSON path extraction."""
-
-    def test_simple_key(self):
-        """Extract simple top-level key."""
-        data = {"temperature": 22.5}
-        assert extract_json_value(data, "temperature") == 22.5
-
-    def test_nested_key(self):
-        """Extract nested key with dot notation."""
-        data = {"data": {"sensors": {"temperature": 22.5}}}
-        assert extract_json_value(data, "data.sensors.temperature") == 22.5
-
-    def test_empty_path_returns_full_data(self):
-        """Empty path returns entire data object."""
-        data = {"temp": 22.5}
-        assert extract_json_value(data, "") == data
-
-    def test_missing_key_returns_none(self):
-        """Missing key returns None."""
-        data = {"temperature": 22.5}
-        assert extract_json_value(data, "humidity") is None
-
-    def test_missing_nested_key_returns_none(self):
-        """Missing nested key returns None."""
-        data = {"data": {"temperature": 22.5}}
-        assert extract_json_value(data, "data.humidity") is None
-
-    def test_list_index(self):
-        """Extract from list by index."""
-        data = {"sensors": [{"value": 10}, {"value": 20}]}
-        assert extract_json_value(data, "sensors.1.value") == 20
-
-    def test_invalid_list_index_returns_none(self):
-        """Invalid list index returns None."""
-        data = {"sensors": [{"value": 10}]}
-        assert extract_json_value(data, "sensors.5.value") is None
-
-    def test_non_dict_intermediate_returns_none(self):
-        """Non-dict intermediate returns None."""
-        data = {"value": 42}
-        assert extract_json_value(data, "value.nested") is None
+async def test_a_failing_path_warns_once_and_keeps_polling(sim, caplog):
+    (client,) = clients_for(
+        [{"name": "wx", "base_url": sim.url, "paths": ["/api/sensors", "/missing", "/health"]}]
+    )
+    client.poll_interval = 0.05
+    async with running(HttpRunner([client])):
+        await wait_until(lambda: client.poll_count >= 5, 5.0)
+    assert logged(caplog, logging.WARNING) == ["[wx] Path '/missing': HTTP 404; still polled"]
+    assert not [r for r in caplog.records if r.name.startswith("aiohttp")]  # no access lines
+    assert client.reachable and client.errors >= 5
+    assert {"_server", "api/sensors", "api/sensors/wind", "health"} == set(client._events)
 
 
-class TestCoerceValue:
-    """Test value coercion."""
+async def test_actions_dispatch_into_the_polling_loop(sim):
+    a, b = clients_for(
+        [
+            {"name": "wx", "base_url": sim.url, "paths": PATHS, "endpoint_map_file": DEMO_MAP},
+            {"name": "wx2", "base_url": sim.url, "paths": ["/api/system"]},
+        ]
+    )
+    runner = HttpRunner([a, b])
+    actions.set_runner(runner)
+    task = asyncio.create_task(runner._run_async())
 
-    def test_float32(self):
-        """Float32 coercion."""
-        assert coerce_value(22.5, "float32") == 22.5
-        assert coerce_value("22.5", "float32") == 22.5
+    def call(action, *args):
+        return asyncio.to_thread(action, *args)
 
-    def test_uint32(self):
-        """Uint32 coercion."""
-        assert coerce_value(1000, "uint32") == 1000
-        assert coerce_value(22.7, "uint32") == 22
+    try:
+        await wait_until(lambda: a.poll_count >= 1 and b.poll_count >= 1, 5.0)
+        read = await call(actions.read_endpoint, "temperature", "", "wx")
+        assert read["event"] == "environment" and 10.0 < read["value"] < 35.0
+        read = await call(actions.read_endpoint, "", "/api/sensors", "wx")
+        assert set(read["events"]) == {"api/sensors", "api/sensors/wind"}
 
-    def test_bool(self):
-        """Bool coercion."""
-        assert coerce_value(True, "bool") is True
-        assert coerce_value(0, "bool") is False
-        assert coerce_value(1, "bool") is True
+        written = await call(actions.write_endpoint, "alarm_threshold", "45.5", "wx")
+        assert (written["value"], written["status"]) == (45.5, 200)
+        assert (await call(actions.read_endpoint, "config/alarm_threshold", "", "wx"))[
+            "value"
+        ] == 45.5
+        with pytest.raises(ValueError, match="Unknown endpoint 'temp'. Use list_endpoints"):
+            await call(actions.read_endpoint, "temp", "", "wx")
+        with pytest.raises(ValueError, match="'temperature' is not writable"):
+            await call(actions.write_endpoint, "temperature", "1", "wx")
+        with pytest.raises(ValueError, match="Cannot parse 'warm' as float32"):
+            await call(actions.write_endpoint, "alarm_threshold", "warm", "wx")
 
-    def test_string(self):
-        """String coercion."""
-        assert coerce_value("hello", "string") == "hello"
-        assert coerce_value(42, "string") == "42"
+        sent = await call(actions.send_request, "PUT", "/api/config", '{"sample_rate": 2}', "wx")
+        assert sent["status"] == 200 and sent["body"]["updated"] == {"sample_rate": 2.0}
+        assert sent["headers"]["Content-Type"].startswith("application/json")
+        with pytest.raises(RuntimeError, match="GET /nope answered HTTP 404"):
+            await call(actions.send_request, "GET", "/nope", "", "wx")
+        with pytest.raises(ValueError, match="Body is not JSON"):
+            await call(actions.send_request, "POST", "/api/config", "{bad", "wx")
 
-    def test_none_returns_none(self):
-        """None input returns None."""
-        assert coerce_value(None, "float32") is None
+        listing = actions.list_endpoints("wx")
+        assert len(listing["endpoints"]) == 13
+        sensors = next(p for p in listing["paths"] if p["path"] == "/api/sensors")
+        assert sensors["events"]["api/sensors/wind"] == {"direction": "float64", "gust": "float64"}
+        assert actions.list_endpoints()["count"] == 13 + 3
+        assert actions.get_status()["count"] == 2
+        status = actions.get_status("wx2")
+        assert (status["state"], status["last_status"]) == ("ok", 200)
 
-    def test_scale_factor(self):
-        """Scale factor is applied."""
-        assert coerce_value(100, "float32", scale=0.1) == pytest.approx(10.0)
-        assert coerce_value(100, "uint16", scale=0.1) == 10
-
-    def test_invalid_value_returns_none(self):
-        """Non-numeric string returns None for numeric types."""
-        assert coerce_value("not_a_number", "float32") is None
-
-    def test_int8_coercion(self):
-        """Int8 coercion."""
-        assert coerce_value(127, "int8") == 127
-
-    def test_uint8_coercion(self):
-        """Uint8 coercion."""
-        assert coerce_value(255, "uint8") == 255
-
-
-# =============================================================================
-# Simulator Tests (no network)
-# =============================================================================
-
-
-class TestWeatherStationSimulator:
-    """Test simulator physics logic."""
-
-    def test_sensors_returns_all_fields(self):
-        """Sensors endpoint returns complete value dictionary."""
-        sim = WeatherStationSimulator()
-        values = sim.get_sensors()
-        expected = {"temperature", "humidity", "pressure", "wind_speed", "timestamp"}
-        assert set(values.keys()) == expected
-
-    def test_temperature_near_baseline(self):
-        """Temperature stays within reasonable range."""
-        sim = WeatherStationSimulator()
-        values = sim.get_sensors()
-        assert 10.0 < values["temperature"] < 35.0
-
-    def test_humidity_in_range(self):
-        """Humidity stays within valid range."""
-        sim = WeatherStationSimulator()
-        values = sim.get_sensors()
-        assert 20.0 <= values["humidity"] <= 95.0
-
-    def test_pressure_near_baseline(self):
-        """Pressure stays near baseline."""
-        sim = WeatherStationSimulator()
-        values = sim.get_sensors()
-        assert 1005.0 < values["pressure"] < 1025.0
-
-    def test_power_returns_all_fields(self):
-        """Power endpoint returns expected fields."""
-        sim = WeatherStationSimulator()
-        values = sim.get_power()
-        expected = {"battery_voltage", "solar_watts", "soc", "charging"}
-        assert set(values.keys()) == expected
-
-    def test_battery_voltage_reasonable(self):
-        """Battery voltage is in valid range."""
-        sim = WeatherStationSimulator()
-        values = sim.get_power()
-        assert 10.5 < values["battery_voltage"] < 13.5
-
-    def test_system_returns_all_fields(self):
-        """System endpoint returns expected fields."""
-        sim = WeatherStationSimulator()
-        values = sim.get_system()
-        expected = {"uptime_seconds", "cpu_temp", "free_memory_mb", "firmware_version", "hostname"}
-        assert set(values.keys()) == expected
-
-    def test_config_get_and_update(self):
-        """Config can be read and updated."""
-        sim = WeatherStationSimulator()
-        config = sim.get_config()
-        assert config["sample_rate"] == 1.0
-
-        updated = sim.update_config({"sample_rate": 5.0, "alarm_threshold": 50.0})
-        assert updated["sample_rate"] == 5.0
-        assert updated["alarm_threshold"] == 50.0
-
-        config = sim.get_config()
-        assert config["sample_rate"] == 5.0
-        assert config["alarm_threshold"] == 50.0
+        with pytest.raises(ValueError, match="set server to one of: wx, wx2"):
+            await call(actions.read_endpoint, "temperature")
+        with pytest.raises(ValueError, match="Unknown server 'x'. Servers: wx, wx2"):
+            actions.get_status("x")
+        with pytest.raises(ValueError, match="No endpoint map on server 'wx2'"):
+            await call(actions.read_endpoint, "temperature", "", "wx2")
+    finally:
+        actions.set_runner(None)
+        started = time.monotonic()
+        runner.stop()
+        await asyncio.wait_for(task, 10.0)
+        elapsed = time.monotonic() - started
+    assert elapsed < SHUTDOWN_TIMEOUT
 
 
-# =============================================================================
-# Integration Tests with Demo Server
-# =============================================================================
+async def test_a_write_without_an_answer_says_it_may_have_applied():
+    async def stall(request: web.Request) -> web.Response:
+        await asyncio.sleep(1.0)  # past the 0.5 s timeout
+        return web.json_response({})
+
+    app = web.Application()
+    app.router.add_put("/setpoint", stall)
+    server = web.AppRunner(app)
+    await server.setup()
+    port = closed_port()
+    await web.TCPSite(server, "127.0.0.1", port).start()
+    endpoint_map = EndpointMap.from_dict(
+        {"events": {"ctl": [{"name": "sp", "path": "/setpoint", "writable": True}]}}
+    )
+    client = HttpClient("plc", f"http://127.0.0.1:{port}", endpoint_map=endpoint_map, timeout=0.5)
+    client._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=client.timeout))
+    try:
+        with pytest.raises(TimeoutError, match="may have reached the server and been applied"):
+            await client.write_endpoint(endpoint_map.events["ctl"][0], 1.0)
+    finally:
+        await client._session.close()
+        await server.cleanup()
+
+
+def test_actions_need_a_running_extension():
+    actions.set_runner(HttpRunner([HttpClient("wx", "http://127.0.0.1:1", paths=["/x"])]))
+    try:
+        assert actions.get_status()["servers"][0]["state"] == "connecting"
+        with pytest.raises(RuntimeError, match="extension is not running"):
+            actions.read_endpoint(path="/x")
+    finally:
+        actions.set_runner(None)
+    with pytest.raises(RuntimeError, match="No HTTP server is configured"):
+        actions.get_status()
 
 
 @pytest.fixture(scope="module")
-def demo_server():
-    """Fixture that starts demo server for integration tests."""
-    import socket
-    import threading
-    import time
-
-    server = DemoServer(host="127.0.0.1", port=18090)
-
-    def run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(server.start())
-        loop.run_forever()
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-
-    # Wait for server to be ready by polling the socket
-    for _ in range(50):
-        try:
-            sock = socket.create_connection(("127.0.0.1", 18090), timeout=0.1)
-            sock.close()
-            break
-        except OSError:
-            time.sleep(0.1)
-
-    yield server
-
-
-@pytest.fixture
-def endpoint_map():
-    """Load the demo endpoint map."""
-    map_path = Path(__file__).parent.parent / "zelos_extension_http" / "demo" / "demo_device.json"
-    return EndpointMap.from_file(str(map_path))
-
-
-@pytest.fixture
-async def client(demo_server, endpoint_map):
-    """Create a connected HttpClient."""
-    c = HttpClient(
-        base_url="http://127.0.0.1:18090",
-        endpoint_map=endpoint_map,
-        timeout=5.0,
-    )
-    await c.connect()
-    yield c
-    await c.disconnect()
-
-
-class TestDemoServerIntegration:
-    """Integration tests against the demo server."""
-
-    async def test_health_endpoint(self, client):
-        """Health endpoint returns ok."""
-        result = await client.fetch_path("/health")
-        assert result is not None
-        assert result["status"] == "ok"
-
-    async def test_requests_log_no_access_lines(self, client, caplog):
-        import logging
-
-        with caplog.at_level(logging.INFO):
-            assert await client.fetch_path("/api/sensors") is not None
-            await asyncio.sleep(0.2)
-        assert [r.name for r in caplog.records if r.name.startswith("aiohttp")] == []
-
-    async def test_read_sensors(self, client):
-        """Read sensor data from demo server."""
-        result = await client.fetch_path("/api/sensors")
-        assert result is not None
-        assert "temperature" in result
-        assert "humidity" in result
-        assert "pressure" in result
-        assert "wind_speed" in result
-
-    async def test_read_float32_endpoint(self, client):
-        """Read float32 value via endpoint definition."""
-        ep = client.endpoint_map.get_by_name("temperature")
-        assert ep is not None
-        assert ep.datatype == "float32"
-
-        value = await client.fetch_endpoint(ep)
-        assert value is not None
-        assert isinstance(value, float)
-        assert 10.0 < value < 35.0
-
-    async def test_read_uint32_endpoint(self, client):
-        """Read uint32 value via endpoint definition."""
-        ep = client.endpoint_map.get_by_name("uptime")
-        assert ep is not None
-        assert ep.datatype == "uint32"
-
-        value = await client.fetch_endpoint(ep)
-        assert value is not None
-        assert isinstance(value, int)
-        assert value >= 0
-
-    async def test_read_uint8_endpoint(self, client):
-        """Read uint8 value via endpoint definition."""
-        ep = client.endpoint_map.get_by_name("battery_soc")
-        assert ep is not None
-        assert ep.datatype == "uint8"
-
-        value = await client.fetch_endpoint(ep)
-        assert value is not None
-        assert isinstance(value, int)
-        assert 0 <= value <= 100
-
-    async def test_read_string_endpoint(self, client):
-        """Read string value via endpoint definition."""
-        ep = client.endpoint_map.get_by_name("station_name")
-        assert ep is not None
-        assert ep.datatype == "string"
-
-        value = await client.fetch_endpoint(ep)
-        assert value is not None
-        assert isinstance(value, str)
-        assert value == "STATION-001"
-
-    async def test_write_config_endpoint(self, client):
-        """Write a value to a writable config endpoint."""
-        ep = client.endpoint_map.get_by_name("alarm_threshold")
-        assert ep is not None
-        assert ep.writable is True
-
-        assert await client.write_endpoint(ep, 45.0) is True
-
-        data = await client.fetch_path("/api/config")
-        assert data["alarm_threshold"] == 45.0
-
-    async def test_write_non_writable_fails(self, client):
-        """Writing to non-writable endpoint fails."""
-        ep = client.endpoint_map.get_by_name("temperature")
-        assert ep is not None
-        assert ep.writable is False
-
-        assert await client.write_endpoint(ep, 99.0) is False
-
-    async def test_poll_all_events(self, client):
-        """Poll all endpoints and verify event structure."""
-        results = await client._poll_endpoints()
-
-        # Should have all events from endpoint map
-        assert "environment" in results
-        assert "power" in results
-        assert "system" in results
-        assert "config" in results
-
-        # Environment event should have temperature, humidity, etc.
-        assert "temperature" in results["environment"]
-        assert "humidity" in results["environment"]
-        assert "pressure" in results["environment"]
-
-        # Check values are reasonable
-        assert 10.0 < results["environment"]["temperature"] < 35.0
-
-    async def test_shared_path_polling_efficiency(self, client):
-        """Multiple endpoints sharing a path should result in one HTTP request."""
-        # The environment event has 4 endpoints all pointing to /api/sensors
-        # This tests that path_cache works correctly
-        results = await client._poll_endpoints()
-        env = results.get("environment", {})
-        assert "temperature" in env
-        assert "humidity" in env
-        assert "pressure" in env
-        assert "wind_speed" in env
-
-    async def test_read_power_data(self, client):
-        """Read power system data."""
-        result = await client.fetch_path("/api/power")
-        assert result is not None
-        assert "battery_voltage" in result
-        assert "solar_watts" in result
-        assert "soc" in result
-        assert 10.5 < result["battery_voltage"] < 13.5
-
-    async def test_read_system_data(self, client):
-        """Read system status data."""
-        result = await client.fetch_path("/api/system")
-        assert result is not None
-        assert "uptime_seconds" in result
-        assert "cpu_temp" in result
-        assert result["firmware_version"] == "1.2.3"
-
-
-# =============================================================================
-# Action Tests
-# =============================================================================
-
-
-class TestReconnection:
-    """Tests for connection error detection."""
-
-    def test_is_connection_error_timeout(self):
-        """Timeout errors are detected as connection errors."""
-        client = HttpClient()
-        assert client._is_connection_error(Exception("Connection timeout")) is True
-
-    def test_is_connection_error_refused(self):
-        """Connection refused errors are detected."""
-        client = HttpClient()
-        assert client._is_connection_error(Exception("Connection refused")) is True
-
-    def test_is_connection_error_false_for_other(self):
-        """Non-connection errors return False."""
-        client = HttpClient()
-        assert client._is_connection_error(Exception("Invalid JSON")) is False
-        assert client._is_connection_error(ValueError("bad value")) is False
-
-
-class TestActionsUnit:
-    """Unit tests for SDK actions (no network)."""
-
-    @pytest.fixture
-    def client_with_map(self):
-        """Create client with endpoint map but no connection."""
-        data = {
-            "name": "test_device",
-            "events": {
-                "sensors": [
-                    {"name": "temp", "path": "/api/temp", "unit": "C"},
-                    {"name": "humidity", "path": "/api/humidity", "unit": "%"},
-                ],
-                "config": [
-                    {
-                        "name": "setpoint",
-                        "path": "/api/config",
-                        "writable": True,
-                    },
-                ],
-            },
-        }
-        ep_map = EndpointMap.from_dict(data)
-        return HttpClient(endpoint_map=ep_map)
-
-    def test_get_status_returns_info(self, client_with_map):
-        """Get Status action returns expected fields."""
-        result = client_with_map.get_status()
-        assert "connected" in result
-        assert "base_url" in result
-        assert "poll_count" in result
-        assert "endpoints" in result
-        assert result["endpoints"] == 3
-
-    def test_list_endpoints_returns_all(self, client_with_map):
-        """List Endpoints action returns all endpoints."""
-        result = client_with_map.list_endpoints()
-        assert result["count"] == 3
-        names = [ep["name"] for ep in result["endpoints"]]
-        assert "temp" in names
-        assert "humidity" in names
-        assert "setpoint" in names
-
-    def test_list_endpoints_no_map(self):
-        """List Endpoints with no map returns empty."""
-        client = HttpClient()
-        result = client.list_endpoints()
-        assert result["count"] == 0
-        assert result["endpoints"] == []
-
-    def test_read_endpoint_no_map(self):
-        """Read Endpoint with no map returns error."""
-        client = HttpClient()
-        result = client.read_endpoint("anything")
-        assert result["success"] is False
-        assert "error" in result
-
-    def test_read_endpoint_not_found(self, client_with_map):
-        """Read Endpoint with unknown name returns error."""
-        result = client_with_map.read_endpoint("nonexistent")
-        assert result["success"] is False
-        assert "not found" in result["error"]
-
-    def test_write_endpoint_no_map(self):
-        """Write Endpoint with no map returns error."""
-        client = HttpClient()
-        result = client.write_endpoint_action("anything", "100")
-        assert result["success"] is False
-        assert "error" in result
-
-    def test_write_endpoint_not_found(self, client_with_map):
-        """Write Endpoint with unknown name returns error."""
-        result = client_with_map.write_endpoint_action("nonexistent", "100")
-        assert result["success"] is False
-        assert "not found" in result["error"]
-
-    def test_write_endpoint_not_writable(self, client_with_map):
-        """Write Endpoint to non-writable endpoint returns error."""
-        result = client_with_map.write_endpoint_action("temp", "100")
-        assert result["success"] is False
-        assert "not writable" in result["error"]
-
-    def test_read_endpoint_without_polling_loop_raises(self, client_with_map):
-        with pytest.raises(RuntimeError, match="The HTTP client is not running"):
-            client_with_map.read_endpoint("temp")
-
-
-class TestActionFlags:
-    """Pins each action's flags, so a new action or a changed flag is a deliberate choice."""
-
-    def test_action_flags(self):
-        actual = {
-            name: (member._action.read_only, member._action.hidden)
-            for name, member in vars(HttpClient).items()
-            if hasattr(member, "_action")
-        }
-        assert actual == {
-            "get_status": (True, True),
-            "send_request": (False, False),
-            "list_endpoints": (True, True),
-            "read_endpoint": (False, False),
-            "write_endpoint_action": (False, False),
-        }
-
-
-class TestActionsIntegration:
-    """Integration tests for SDK actions with demo server."""
-
-    async def test_list_endpoints_action(self, client):
-        """List Endpoints action returns all demo endpoints."""
-        result = client.list_endpoints()
-        assert result["count"] > 0
-        names = [ep["name"] for ep in result["endpoints"]]
-        assert "temperature" in names
-        assert "battery_voltage" in names
-        assert "uptime" in names
-
-    async def test_get_status_action(self, client):
-        """Get Status action returns connection info."""
-        result = client.get_status()
-        assert result["connected"] is True
-        assert result["endpoints"] > 0
-
-
-# =============================================================================
-# End-to-End Lifecycle Tests (polling loop running)
-# =============================================================================
-
-
-@pytest.fixture
-def polling_client(demo_server, endpoint_map):
-    """Client with active polling loop running in a background thread.
-
-    This mirrors production: the polling loop owns the event loop,
-    and actions are called from a separate thread (like the SDK's gRPC thread).
-    """
-    import threading
-    import time
-
-    c = HttpClient(
-        base_url="http://127.0.0.1:18090",
-        endpoint_map=endpoint_map,
-        poll_interval=0.2,
-        timeout=5.0,
-    )
-    c.start()
-
-    thread = threading.Thread(target=c.run, daemon=True)
-    thread.start()
-
-    # Wait for first successful poll
-    for _ in range(50):
-        if c._poll_count > 0:
-            break
-        time.sleep(0.1)
-    assert c._poll_count > 0, "Polling loop did not start"
-
-    yield c
-    c.stop()
-
-
-class TestEndToEndLifecycle:
-    """Full lifecycle tests with active polling loop.
-
-    These test the production topology: polling loop in a background thread,
-    actions called from the test thread (simulating the SDK's gRPC thread).
-    """
-
-    def test_polling_loop_advances(self, polling_client):
-        """Polling loop runs continuously and accumulates polls."""
-        import time
-
-        initial = polling_client._poll_count
-        time.sleep(0.6)
-        assert polling_client._poll_count >= initial + 2
-        assert polling_client._error_count == 0
-
-    def test_trace_source_initialized(self, polling_client):
-        """Trace source has correct events from endpoint map."""
-        src = polling_client.source
-        assert src is not None
-        assert getattr(src, "environment", None) is not None
-        assert getattr(src, "power", None) is not None
-        assert getattr(src, "system", None) is not None
-        assert getattr(src, "config", None) is not None
-
-    def test_read_endpoint_during_polling(self, polling_client):
-        """Read action works cross-thread while polling loop is active."""
-        result = polling_client.read_endpoint("temperature")
-        assert result["success"] is True
-        assert isinstance(result["value"], float)
-        assert 10.0 < result["value"] < 35.0
-
-    def test_send_request_runs_without_a_body(self, polling_client):
-        from zelos_sdk.actions import ActionsRegistry
-
-        registry = ActionsRegistry()
-        registry.register(polling_client)
-        result = registry.execute(
-            "HttpClient/send_request", {"path": "/api/sensors", "method": "GET"}
+def tls(tmp_path_factory):
+    """A private CA, its PEM on disk, and a server context for 127.0.0.1 signed by it."""
+    ca = trustme.CA()
+    ca_file = tmp_path_factory.mktemp("tls") / "ca.pem"
+    ca.cert_pem.write_to_path(str(ca_file))
+    server = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ca.issue_cert("127.0.0.1").configure_cert(server)
+    return str(ca_file), server
+
+
+@pytest.mark.parametrize(
+    ("settings", "reachable", "warnings"),
+    [
+        ("ca_file", True, []),
+        (
+            "verify_off",
+            True,
+            ["[secure] TLS certificate verification is off: the server is not authenticated"],
+        ),
+        ("system_cas", False, []),
+    ],
+)
+async def test_tls_verifies_the_server(tls, caplog, settings, reachable, warnings):
+    ca_file, server_context = tls
+    async with DemoServer(port=0, ssl_context=server_context) as sim:
+        server = {"name": "secure", "base_url": sim.url, "paths": PATHS}
+        server |= {"ca_file": {"ca_file": ca_file}, "verify_off": {"verify_tls": False}}.get(
+            settings, {}
         )
-        assert result.value["status_code"] == 200
-        result = registry.execute(
-            "HttpClient/send_request",
-            {"path": "/api/config", "method": "PUT", "body": '{"station_name": "Roof"}'},
-        )
-        assert result.value["response"]["updated"] == {"station_name": "Roof"}
-
-    def test_send_request_during_polling(self, polling_client):
-        """Send Request action works cross-thread during active polling."""
-        result = polling_client.send_request("/api/sensors", "GET", "")
-        assert result["success"] is True
-        assert result["status_code"] == 200
-        assert "temperature" in result["response"]
-
-    def test_write_then_read_round_trip(self, polling_client):
-        """Write a config value, read it back via action."""
-        import time
-
-        write_result = polling_client.write_endpoint_action("alarm_threshold", "99.0")
-        assert write_result["success"] is True
-
-        time.sleep(0.5)
-
-        read_result = polling_client.read_endpoint("alarm_threshold")
-        assert read_result["success"] is True
-        assert read_result["value"] == pytest.approx(99.0)
-
-    def test_get_status_reflects_live_state(self, polling_client):
-        """Get Status reports accurate live metrics."""
-        result = polling_client.get_status()
-        assert result["connected"] is True
-        assert result["poll_count"] > 0
-        assert result["error_count"] == 0
-        assert result["last_status_code"] == 200
-        assert result["endpoints"] == 13
+        runner = HttpRunner(clients_for([server]))
+        async with running(runner):
+            await wait_until(runner.clients["secure"].contacted.is_set, 5.0)
+    assert runner.clients["secure"].reachable is reachable
+    assert logged(caplog, logging.WARNING) == warnings
+    if not reachable:
+        assert logged(caplog, logging.ERROR) == [
+            f"Server 'secure' ({sim.url}): cannot connect: TLS certificate not trusted "
+            "(unable to get local issuer certificate); set CA File to the CA that issued the "
+            "server's certificate, or turn off Verify TLS, then start the extension again"
+        ]
 
 
-def test_logs_record_on_the_data_source(monkeypatch):
-    import logging
-    from types import SimpleNamespace
-
-    from zelos_sdk.hooks.logging import TraceLoggingHandler
-
-    from zelos_extension_http.cli import app
-
-    clients: list[HttpClient] = []
-    sdk = SimpleNamespace(
-        actions_registry=SimpleNamespace(register=clients.append),
-        init=lambda **_kwargs: None,
-    )
-    monkeypatch.setattr(app, "zelos_sdk", sdk)
-    monkeypatch.setattr(app, "load_config", dict)
-    monkeypatch.setattr(HttpClient, "run", lambda self: None)
-    root = logging.getLogger()
-    before = list(root.handlers)
-    try:
-        app.run_app_mode()
-        added = [h for h in root.handlers if h not in before]
-    finally:
-        for handler in [h for h in root.handlers if h not in before]:
-            root.removeHandler(handler)
-    assert [type(h) for h in added] == [TraceLoggingHandler]
-    assert added[0].trace_source is clients[0].source
-
-
-def test_saved_config_off_the_schema_exits(tmp_path, monkeypatch, caplog):
-    import logging
-
-    from zelos_extension_http.cli import app
-
-    saved = tmp_path / "config.json"
-    saved.write_text(json.dumps({"base_url": "http://127.0.0.1:8080", "poll_interval": 0}))
-    monkeypatch.setenv("ZELOS_CONFIG_PATH", str(saved))
-    monkeypatch.chdir(Path(__file__).parents[1])
-    with pytest.raises(SystemExit) as exc:
-        app.run_app_mode()
-    assert exc.value.code == 1
-    assert [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR] == [
-        "Invalid configuration: poll_interval: 0 is less than the minimum of 0.1"
+async def test_auto_config_checks_the_form_servers(sim):
+    none = await asyncio.to_thread(actions.auto_config, {})
+    assert none == {"status": "error", "message": NO_SERVERS}
+    gone = f"http://127.0.0.1:{closed_port()}"
+    servers = [
+        {"name": "wx", "base_url": sim.url, "paths": ["/api/sensors"]},
+        {"base_url": gone},
+        {"base_url": "http://admin:s3cret@gw:8080"},
+        {"base_url": sim.url + "/api/system"},
     ]
+    result = await asyncio.to_thread(actions.auto_config, {"servers": servers})
+    assert result["status"] == "success"
+    assert result["config"] == {"servers": servers}  # kept as entered
+    assert result["message"] == (
+        f"Found wx at {sim.url}/api/sensors (HTTP 200, JSON; traces api/sensors, "
+        f"api/sensors/wind); 127_0_0_1 at {sim.url}/api/system (HTTP 200, JSON; add a path "
+        f"under Paths to trace it). Couldn't connect to {gone} (connection refused); check the "
+        "Base URL and that the server is running. gw: remove the user name / password from the "
+        "Base URL; the extension sends no credentials."
+    )

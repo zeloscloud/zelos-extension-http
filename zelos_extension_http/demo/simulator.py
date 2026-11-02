@@ -1,14 +1,20 @@
-"""Simulated weather station HTTP API for demo mode.
+"""Simulated weather station HTTP API: demo mode, `demo-server` and the tests.
 
-Uses aiohttp to run a local REST API server with realistic
-sensor data that changes over time.
+A local aiohttp REST server with sensor data that changes over time. Its
+responses hold a nested object (`wind`), an array (`cell_voltages`) and strings,
+so discovery has each shape to trace.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import math
 import random
+import signal
+import ssl
+import threading
 import time
 
 from aiohttp import web
@@ -53,12 +59,17 @@ class WeatherStationSimulator:
         # Wind speed: gusty
         wind_base = 3.0 + 2.0 * math.sin(t * 0.02)
         wind_speed = max(0.0, wind_base + random.gauss(0, 0.5))
+        direction = (180.0 + 40.0 * math.sin(t * 0.004) + random.gauss(0, 5.0)) % 360.0
 
         return {
             "temperature": round(temperature, 2),
             "humidity": round(humidity, 2),
             "pressure": round(pressure, 2),
             "wind_speed": round(wind_speed, 2),
+            "wind": {
+                "direction": round(direction, 1),
+                "gust": round(wind_speed + abs(random.gauss(0, 1.0)), 2),
+            },
             "timestamp": time.time(),
         }
 
@@ -73,11 +84,13 @@ class WeatherStationSimulator:
         self.battery_soc = max(20, min(100, self.battery_soc + (solar - 15.0) * 0.001))
         self.battery_voltage = 11.0 + (self.battery_soc / 100.0) * 1.8
 
+        cell = self.battery_voltage / 4
         return {
             "battery_voltage": round(self.battery_voltage, 2),
             "solar_watts": round(solar, 1),
             "soc": int(self.battery_soc),
             "charging": solar > 15.0,
+            "cell_voltages": [round(cell + random.gauss(0, 0.01), 3) for _ in range(4)],
         }
 
     def get_system(self) -> dict:
@@ -118,14 +131,24 @@ class WeatherStationSimulator:
 
 
 class DemoServer:
-    """HTTP demo server wrapping the weather station simulator."""
+    """HTTP demo server wrapping the weather station simulator.
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8090) -> None:
+    `port=0` binds a free port; `port` holds the bound one once started.
+    """
+
+    def __init__(
+        self, host: str = "127.0.0.1", port: int = 8090, ssl_context: ssl.SSLContext | None = None
+    ) -> None:
         self.host = host
         self.port = port
+        self.ssl_context = ssl_context
         self.simulator = WeatherStationSimulator()
         self._runner: web.AppRunner | None = None
-        self._site: web.TCPSite | None = None
+
+    @property
+    def url(self) -> str:
+        """The base URL to configure."""
+        return f"{'https' if self.ssl_context else 'http'}://{self.host}:{self.port}"
 
     def _create_app(self) -> web.Application:
         app = web.Application()
@@ -161,18 +184,73 @@ class DemoServer:
         return web.json_response({"status": "ok"})
 
     async def start(self) -> None:
-        """Start the server."""
-        app = self._create_app()
-        self._runner = web.AppRunner(app, access_log=None)
+        """Start the server. Raises OSError when the port is taken."""
+        self._runner = web.AppRunner(self._create_app(), access_log=None)
         await self._runner.setup()
-        self._site = web.TCPSite(self._runner, self.host, self.port)
-        await self._site.start()
-        logger.info(f"Demo HTTP server started on http://{self.host}:{self.port}")
+        site = web.TCPSite(self._runner, self.host, self.port, ssl_context=self.ssl_context)
+        try:
+            await site.start()
+        except OSError:
+            await self._runner.cleanup()
+            self._runner = None
+            raise
+        self.port = self._runner.addresses[0][1]
+        logger.info("Demo HTTP server started on %s", self.url)
 
     async def stop(self) -> None:
         """Stop the server."""
         if self._runner:
             await self._runner.cleanup()
             self._runner = None
-            self._site = None
-        logger.info("Demo HTTP server stopped")
+            logger.info("Demo HTTP server stopped")
+
+    async def __aenter__(self) -> DemoServer:
+        await self.start()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.stop()
+
+
+def start_demo_server_thread(host: str, port: int) -> DemoServer:
+    """The simulator on its own loop in a daemon thread, listening on return.
+
+    Raises:
+        RuntimeError: If it cannot bind, e.g. one already runs there
+    """
+    server = DemoServer(host=host, port=port)
+    ready = threading.Event()
+    failure: list[OSError] = []
+
+    def run() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(server.start())
+        except OSError as e:
+            failure.append(e)
+            ready.set()
+            loop.close()
+            return
+        ready.set()
+        loop.run_forever()
+
+    threading.Thread(target=run, name="demo-server", daemon=True).start()
+    ready.wait(10.0)
+    if failure:
+        reason = failure[0].strerror or failure[0]
+        raise RuntimeError(
+            f"Could not start the simulator on {host}:{port} ({reason}); "
+            "one may already be running there"
+        )
+    return server
+
+
+async def run_sim(host: str, port: int) -> None:
+    """The simulator in the foreground until SIGINT/SIGTERM. Raises OSError on a taken port."""
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+            loop.add_signal_handler(sig, stop.set)
+    async with DemoServer(host=host, port=port):
+        await stop.wait()

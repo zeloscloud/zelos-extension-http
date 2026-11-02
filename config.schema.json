@@ -2,72 +2,201 @@
   "$comment": "HTTP extension configuration schema. See https://docs.zeloscloud.io/sdk/how-to/develop-extensions/#configuration",
   "type": "object",
   "title": "HTTP Configuration",
-  "description": "Configure HTTP/REST API endpoint polling",
+  "description": "Poll HTTP and HTTPS REST APIs and trace their JSON responses",
+  "ui:options": {
+    "autoconfig": "HTTP/auto_config"
+  },
   "properties": {
-    "demo": {
-      "type": "boolean",
-      "title": "Demo Mode",
-      "description": "Use built-in weather station simulator (no server required)",
-      "default": false
-    },
-    "base_url": {
-      "type": "string",
-      "title": "Base URL",
-      "description": "Base URL for all endpoints (e.g., http://192.168.1.100:8080)",
-      "default": "http://127.0.0.1:8080",
-      "ui:placeholder": "http://host:port"
-    },
-    "endpoint_map_file": {
-      "type": "string",
-      "title": "Endpoint Map File",
-      "description": "Path to JSON endpoint map file",
-      "ui:widget": "file-picker",
-      "ui:options": {
-        "accept": ".json"
+    "servers": {
+      "type": "array",
+      "title": "Servers",
+      "description": "HTTP servers to poll. Click 'Add' to add a server, then use Auto-configure to check the servers here.",
+      "default": [],
+      "items": {
+        "type": "object",
+        "title": "Server",
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Label this server appears under in the trace and the `server` parameter of the actions. Defaults to the Base URL host (e.g. weather01, 192_168_1_10). Letters, digits, space, '_' or '-'.",
+            "default": "",
+            "ui:placeholder": "defaults to Base URL host"
+          },
+          "base_url": {
+            "type": "string",
+            "title": "Base URL",
+            "description": "Scheme, host and port, plus any path every request shares, e.g. http://192.168.1.100:8080 or https://gateway.local/api. No user name or password: the extension sends no credentials.",
+            "default": "",
+            "ui:placeholder": "http://192.168.1.100:8080"
+          },
+          "paths": {
+            "type": "array",
+            "title": "Paths",
+            "description": "URL paths polled without a map, each JSON response traced as it comes: /api/sensors traces as event api/sensors, a nested object as a sub-event, an array as fields <key>_0, <key>_1, ...",
+            "items": {
+              "type": "string",
+              "ui:placeholder": "/api/sensors"
+            },
+            "default": []
+          },
+          "endpoint_map_file": {
+            "type": "string",
+            "title": "Endpoint Map File",
+            "description": "JSON endpoint map: named, typed signals picked out of responses by JSON path, and writable setpoints. Optional beside Paths.",
+            "default": "",
+            "ui:widget": "file-picker",
+            "ui:options": {
+              "accept": ".json"
+            }
+          },
+          "poll_interval": {
+            "type": "number",
+            "title": "Poll Interval (seconds)",
+            "description": "How often every path and mapped endpoint is requested, and the _server health event logged",
+            "default": 1.0,
+            "minimum": 0.1,
+            "maximum": 60.0
+          },
+          "timeout": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "title": "Timeout (seconds)",
+            "description": "Request timeout. Empty uses Advanced > Timeout.",
+            "default": null,
+            "minimum": 0.5,
+            "maximum": 30.0
+          },
+          "verify_tls": {
+            "type": "boolean",
+            "title": "Verify TLS",
+            "description": "For https: check the server's certificate and host name. Off: any certificate is accepted, with a WARNING at start.",
+            "default": true,
+            "ui:widget": "toggle"
+          },
+          "ca_file": {
+            "type": "string",
+            "title": "CA File",
+            "description": "CA certificates (PEM) that verify this server, instead of the system's: for a private CA or a self-signed server. Empty uses Advanced > CA File.",
+            "default": "",
+            "ui:widget": "file-picker",
+            "ui:options": {
+              "accept": ".pem,.crt,.cer"
+            }
+          },
+          "cert_file": {
+            "type": "string",
+            "title": "Client Certificate",
+            "description": "Client certificate (PEM) for a server that requires one (mutual TLS). Empty uses Advanced > Client Certificate.",
+            "default": "",
+            "ui:widget": "file-picker",
+            "ui:options": {
+              "accept": ".pem,.crt,.cer"
+            }
+          },
+          "key_file": {
+            "type": "string",
+            "title": "Client Private Key",
+            "description": "Unencrypted private key (PEM) for the client certificate; empty when the certificate file holds it.",
+            "default": "",
+            "ui:widget": "file-picker",
+            "ui:options": {
+              "accept": ".pem,.key"
+            }
+          }
+        },
+        "required": [
+          "base_url"
+        ],
+        "additionalProperties": false,
+        "ui:order": [
+          "name",
+          "base_url",
+          "paths",
+          "endpoint_map_file",
+          "poll_interval",
+          "*"
+        ]
       }
     },
-    "poll_interval": {
-      "type": "number",
-      "title": "Poll Interval (seconds)",
-      "description": "How often to poll endpoints",
-      "default": 1.0,
-      "minimum": 0.1,
-      "maximum": 60.0
-    },
-    "timeout": {
-      "type": "number",
-      "title": "Request Timeout (seconds)",
-      "description": "HTTP request timeout",
-      "default": 5.0,
-      "minimum": 0.5,
-      "maximum": 30.0
-    },
-    "headers": {
-      "type": "string",
-      "title": "Custom Headers (JSON)",
-      "description": "JSON object of headers to include with every request (e.g., {\"Authorization\": \"Bearer token\"})",
-      "ui:placeholder": "{}"
-    },
-    "verify_ssl": {
-      "type": "boolean",
-      "title": "Verify SSL",
-      "description": "Verify SSL certificates for HTTPS endpoints",
-      "default": true
-    },
-    "log_level": {
-      "type": "string",
-      "title": "Log Level",
-      "description": "Logging verbosity",
-      "enum": [
-        "DEBUG",
-        "INFO",
-        "WARNING",
-        "ERROR"
-      ],
-      "default": "INFO"
+    "advanced": {
+      "type": "object",
+      "title": "Advanced",
+      "description": "Settings shared by every server, and the defaults a server inherits.",
+      "properties": {
+        "prefix": {
+          "type": "string",
+          "title": "Prefix",
+          "description": "Leading trace source every server publishes under, so events read '<prefix>/<server>/<event>'. Clear it to give each server its own trace source with unprefixed events.",
+          "default": "HTTP",
+          "ui:placeholder": "HTTP",
+          "ui:emptyValue": ""
+        },
+        "log_level": {
+          "type": "string",
+          "title": "Log Level",
+          "description": "Logging verbosity",
+          "enum": [
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR"
+          ],
+          "default": "INFO"
+        },
+        "retry_unreachable_at_start": {
+          "type": "boolean",
+          "title": "Retry Unreachable at Start",
+          "description": "Off: a server that cannot be reached at start stops the extension. On: it logs an ERROR and is retried like a dropped connection while the other servers poll.",
+          "default": false,
+          "ui:widget": "toggle"
+        },
+        "timeout": {
+          "type": "number",
+          "title": "Timeout (seconds)",
+          "description": "Request timeout for every server that leaves its own empty",
+          "default": 5.0,
+          "minimum": 0.5,
+          "maximum": 30.0
+        },
+        "ca_file": {
+          "type": "string",
+          "title": "CA File",
+          "description": "CA certificates (PEM) that verify every server without its own, instead of the system's.",
+          "default": "",
+          "ui:widget": "file-picker",
+          "ui:options": {
+            "accept": ".pem,.crt,.cer"
+          }
+        },
+        "cert_file": {
+          "type": "string",
+          "title": "Client Certificate",
+          "description": "Client certificate (PEM) every server without its own presents (mutual TLS).",
+          "default": "",
+          "ui:widget": "file-picker",
+          "ui:options": {
+            "accept": ".pem,.crt,.cer"
+          }
+        },
+        "key_file": {
+          "type": "string",
+          "title": "Client Private Key",
+          "description": "Unencrypted private key (PEM) for the client certificate; empty when the certificate file holds it.",
+          "default": "",
+          "ui:widget": "file-picker",
+          "ui:options": {
+            "accept": ".pem,.key"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "default": {},
+      "ui:options": {
+        "collapsed": true
+      }
     }
-  },
-  "required": [
-    "base_url"
-  ]
+  }
 }
