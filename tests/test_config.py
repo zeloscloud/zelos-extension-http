@@ -59,6 +59,9 @@ def test_manifest_schema_and_actions_agree():
         "send_request": (False, False),
         "write_endpoint": (False, False),
     }
+    # Only the path is required; a caller that omits method gets GET.
+    fields = actions.send_request._action.fields
+    assert {f.name for f in fields if f.required} == {"path"}
 
 
 def test_legacy_config_exits_naming_keys_never_values(tmp_path, monkeypatch, caplog):

@@ -24,6 +24,7 @@ from zelos_extension_http.client import (
     tls_context,
 )
 from zelos_extension_http.discovery import event_name, flatten
+from zelos_extension_http.endpoint_map import EndpointMap
 
 PROBE_TIMEOUT = 2.0
 
@@ -64,7 +65,14 @@ async def _check(server: dict[str, Any], advanced: dict[str, Any]) -> tuple[bool
     if urlparse(base).scheme not in ("http", "https"):
         return False, f"{label}: the Base URL must start with http:// or https://."
     paths = [p.strip() for p in server["paths"] or [] if isinstance(p, str) and p.strip()]
-    url = base + (paths[0] if paths else "")
+    mapped = ""
+    if not paths and server["endpoint_map_file"]:
+        try:
+            endpoints = EndpointMap.from_file(server["endpoint_map_file"]).endpoints
+        except (OSError, ValueError) as e:
+            return False, f"{label}: cannot load its endpoint map ({e})."
+        mapped = endpoints[0].path if endpoints else ""
+    url = base + (paths[0] if paths else mapped)
     effective = inherit(server, advanced)
     try:
         ctx = tls_context(

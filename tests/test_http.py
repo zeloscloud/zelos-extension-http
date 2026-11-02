@@ -236,6 +236,7 @@ async def test_auto_config_checks_the_form_servers(sim):
         {"base_url": gone},
         {"base_url": "http://admin:s3cret@gw:8080"},
         {"base_url": sim.url + "/api/system"},
+        {"name": "mapped", "base_url": sim.url, "endpoint_map_file": DEMO_MAP},
     ]
     result = await asyncio.to_thread(actions.auto_config, {"servers": servers})
     assert result["status"] == "success"
@@ -243,7 +244,9 @@ async def test_auto_config_checks_the_form_servers(sim):
     assert result["message"] == (
         f"Found wx at {sim.url}/api/sensors (HTTP 200, JSON; traces api/sensors, "
         f"api/sensors/wind); 127_0_0_1 at {sim.url}/api/system (HTTP 200, JSON; add a path "
-        f"under Paths to trace it). Couldn't connect to {gone} (connection refused); check the "
-        "Base URL and that the server is running. gw: remove the user name / password from the "
+        f"under Paths to trace it); mapped at {sim.url}/api/sensors (HTTP 200, JSON; its "
+        f"endpoint map picks the signals). Couldn't connect to {gone} (connection refused); "
+        "check the Base URL and that the server is running. gw: remove the user name / password "
+        "from the "
         "Base URL; the extension sends no credentials."
     )

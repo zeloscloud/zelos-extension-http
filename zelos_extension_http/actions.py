@@ -206,7 +206,7 @@ def write_endpoint(name: str, value: str, server: str = "") -> dict[str, Any]:
 
 @zelos_sdk.action("Send Request", "Send one HTTP request and show the response")
 @_server_field
-@zelos_sdk.action.select("method", choices=METHODS, default="GET", title="Method")
+@zelos_sdk.action.select("method", choices=METHODS, default="GET", title="Method", required=False)
 @zelos_sdk.action.text("path", title="Path", description="Below the base URL, e.g. /api/config")
 @zelos_sdk.action.text(
     "body", title="Body (JSON)", required=False, default="", description="Optional JSON body"
