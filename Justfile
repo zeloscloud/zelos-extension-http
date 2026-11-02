@@ -93,9 +93,17 @@ clean:
     rm -rf dist web/node_modules .pytest_cache .ruff_cache *.tar.gz actions.json
     find . -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
 
-# Run the agent runtime locally
+# Run the agent runtime locally (app mode, reads ./config.json)
 run:
     uv run python main.py
+
+# Run against the built-in weather station simulator (no server required)
+demo:
+    uv run python main.py demo
+
+# Run the standalone simulator (http://127.0.0.1:8090); see `main.py demo-server --help`
+sim *ARGS:
+    uv run python main.py demo-server {{ARGS}}
 
 # Update uv.lock after changing dependencies
 lock:
