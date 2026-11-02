@@ -7,84 +7,104 @@
 - [just](https://github.com/casey/just)
 - [uv](https://docs.astral.sh/uv/)
 
-## Layout
+## Development Workflow
 
-`extension.toml` describes everything the extension contributes:
+```bash
+just install  # dependencies + pre-commit hooks
+just run      # run app mode locally (reads ./config.json)
+just demo     # run against the built-in weather station simulator
+just test     # pytest
+just check    # ruff lint + format check
+just format   # auto-fix
+```
 
-| Part | Files | Manifest |
-| ---- | ----- | -------- |
-| Agent runtime | `main.py`, the Python package, `pyproject.toml`, `config.schema.json` | `[agent]`, `[config]` |
+1. Make your changes
+2. `just format`
+3. `just test`
+4. Commit (pre-commit hooks run ruff automatically)
 
-The Python package:
+## Project Structure
 
-| File | Contents |
-| ---- | -------- |
-| `main.py` | CLI: app mode (default), `demo` and `trace` |
-| `zelos_extension_http/client.py` | `HttpClient`: polls endpoints, writes trace events, serves the actions |
-| `zelos_extension_http/endpoint_map.py` | `Endpoint` and `EndpointMap`: events, paths and JSON paths |
-| `zelos_extension_http/cli/app.py` | App mode: reads the config and starts the client |
-| `zelos_extension_http/demo/simulator.py` | The weather station server that demo mode polls |
-| `zelos_extension_http/demo/demo_device.json` | The endpoint map for the simulator |
-| `tests/test_http.py` | Unit tests, and integration tests against the simulator |
+```
+zelos-extension-http/
+├── extension.toml                  # Extension manifest (name, version, agent, package paths)
+├── config.schema.json              # Configuration UI schema
+├── main.py                         # Click entry point
+├── pyproject.toml                  # Dependencies, ruff and pytest config
+├── uv.lock                         # Locked dependency versions
+├── Justfile                        # Development commands
+├── LICENSE
+├── README.md                       # User documentation
+├── CHANGELOG.md
+├── CLAUDE.md                       # Architecture notes
+├── CONTRIBUTING.md                 # This file
+├── .pre-commit-config.yaml
+├── zelos_extension_http/
+│   ├── __init__.py                 # ACTION_PREFIX
+│   ├── actions.py                  # Action functions + register_actions()
+│   ├── autoconfig.py               # The config form's Auto-configure check
+│   ├── client.py                   # One server's polling, health and reconnect; the runner
+│   ├── constants.py                # Trace layout and name rules
+│   ├── discovery.py                # JSON responses as events and fields
+│   ├── endpoint_map.py             # Endpoint map parsing, value coercion
+│   ├── cli/
+│   │   ├── __init__.py
+│   │   └── app.py                  # Config load, startup validation, serve()
+│   └── demo/
+│       ├── __init__.py
+│       ├── simulator.py            # Weather station REST server
+│       └── demo_device.json        # Demo endpoint map
+├── tests/
+│   ├── conftest.py                 # Simulator fixture and helpers
+│   ├── test_config.py              # Config, names, map validation, action flags
+│   ├── test_discovery.py           # Flattening rules
+│   ├── test_http.py                # Against the simulator: reachability, actions, TLS
+│   └── test_e2e.py                 # main.py --file, read back from the trace
+├── assets/
+│   └── icon.svg                    # Marketplace icon
+├── .github/
+│   ├── workflows/
+│   │   ├── CI.yml
+│   │   └── release.yml
+│   └── dependabot.yml
+└── .vscode/
+```
 
-## Commands
+## Common Tasks
 
-| Command                | Description                                        |
-| ---------------------- | -------------------------------------------------- |
-| `just install`         | Install dependencies and the pre-commit hooks      |
-| `just format`          | Format code with ruff                              |
-| `just check`           | Check formatting and lint (ruff)                   |
-| `just test`            | Run tests (pytest)                                 |
-| `just package`         | Package for the Zelos marketplace                  |
-| `just release VERSION` | Bump version, check, test, commit, tag             |
-| `just clean`           | Remove build output, caches and packages           |
+### Run it in Zelos
 
-`just --list` also shows the recipes each part adds. `just install` installs the
-pre-commit hooks in `.pre-commit-config.yaml`.
-
-The tests start the simulator on localhost and poll it with the real client. They need no
-network.
-
-## Run it in Zelos
+With the simulator running (`just sim`):
 
 ```bash
 zelos extensions install-local .
-zelos extensions start local.http --config '{"base_url": "http://127.0.0.1:8090", "demo": true}'
+zelos extensions start local.http \
+  --config '{"servers": [{"base_url": "http://127.0.0.1:8090", "paths": ["/api/sensors"]}]}'
 zelos extensions logs local.http
 ```
 
 A local install runs from your project directory, so you do not install again after a code
-change:
+change: stop and start the extension. After a dependency change, stop it and run
+`zelos extensions reinstall local.http`; after an `extension.toml` change, run
+`zelos extensions install-local .` again.
 
-- Agent runtime: stop and start the extension. After a dependency change, stop it and run
-  `zelos extensions reinstall local.http`.
-- `extension.toml`: run `zelos extensions install-local .` again.
-
-Demo mode starts the weather station simulator on `127.0.0.1:8090` and polls it, so it needs
-no server. To run without the agent's extension manager:
+### Add a Dependency
 
 ```bash
-echo '{"base_url": "http://127.0.0.1:8090", "demo": true}' > config.json
-just run                                                      # app mode, reads ./config.json
-uv run python main.py demo                                    # demo mode, needs no config.json
-uv run python main.py trace http://host:8080 endpoints.json   # poll a real server
+uv add package-name        # runtime
+uv add --dev package-name  # dev
 ```
 
-These connect to the agent at `ZELOS_AGENT_URL`, else `http://localhost:2300`.
-
-## Packaging
+### Package for the Marketplace
 
 ```bash
-just package
+just package   # zelos extensions package .
 ```
 
-The archive lands next to `extension.toml` as `<name>-<version>.tar.gz`, where `<name>` is the
-manifest name in lowercase with every other run of characters turned into one hyphen. It holds
-`extension.toml`, the README, the icon, the config schema and the paths listed in
-`[package] paths`. With an agent runtime it also holds `pyproject.toml`, `uv.lock` and
-`actions.json`, the list of actions that run while the extension is stopped.
+Produces `http-<version>.tar.gz` for the Zelos Marketplace, with `actions.json` (the actions
+that run while the extension is stopped). CI does this automatically.
 
-## Release
+### Create a Release
 
 Add the release to `CHANGELOG.md` and commit it, then:
 
@@ -93,5 +113,40 @@ just release 1.0.0
 git push --follow-tags
 ```
 
-The release workflow checks, tests and packages the extension, then attaches the archive to a
-GitHub release. CI runs the same check, test and package steps on every push and pull request.
+## Testing
+
+Integration tests start the real weather station simulator on a loopback port, so they
+exercise the actual HTTP path (discovery, endpoint maps, TLS, outages). `tests/test_e2e.py`
+runs `main.py --file` in app mode and reads the recorded trace back.
+
+```bash
+just test                        # everything
+uv run pytest -v                 # verbose
+uv run pytest -k test_name       # one test
+```
+
+Keep tests targeted. Prefer one integration test that proves a behavior end to end over
+several unit tests that assert on internals.
+
+```python
+# tests/test_http.py
+async def test_a_failing_path_warns_once_and_keeps_polling(sim, caplog):
+    (client,) = clients_for([{"name": "wx", "base_url": sim.url, "paths": ["/missing"]}])
+    ...
+```
+
+## Code Quality
+
+- ruff, line length 100, google docstrings
+- Type hints on every function signature
+- Comments state the constraint or the failure prevented, not what the code does
+
+## Getting Help
+
+- [Zelos Docs](https://docs.zeloscloud.io)
+- [SDK Guide](https://docs.zeloscloud.io/sdk)
+- [GitHub Issues](https://github.com/zeloscloud/zelos-extension-http/issues)
+
+## License
+
+MIT - see [LICENSE](LICENSE)
