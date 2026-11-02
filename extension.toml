@@ -1,5 +1,5 @@
 name = "HTTP"
-version = "0.1.1"
+version = "0.2.0"
 description = "Poll HTTP and HTTPS REST APIs on an interval and record values from their JSON responses as signals. Write setpoints back with PUT, send one-off requests, and set auth headers."
 author = "Zelos"
 repository = "https://github.com/zeloscloud/zelos-extension-http"
