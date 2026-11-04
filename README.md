@@ -15,6 +15,8 @@ A Zelos extension for HTTP and HTTPS REST APIs. Poll IoT gateways, sensor platfo
 
 ## Quick Start
 
+[![Install the HTTP extension, add a server by its base URL and a path, start it and plot a discovered field](assets/howto/quickstart/quickstart.avif)](assets/howto/quickstart/quickstart.mp4)
+
 From the CLI, on the agent that can reach the server:
 
 ```bash
