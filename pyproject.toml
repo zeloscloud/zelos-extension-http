@@ -1,6 +1,6 @@
 [project]
 name = "zelos-extension-http"
-version = "0.2.0"
+version = "0.3.0"
 description = "Poll HTTP and HTTPS REST APIs and record their JSON responses as signals: every field discovered, or named, typed signals from an endpoint map. Write setpoints back with PUT and send one-off requests."
 authors = [{ name = "Zelos", email = "support@zeloscloud.io" }]
 readme = "README.md"
