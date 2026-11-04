@@ -5,7 +5,7 @@ All notable changes to Zelos Extension HTTP will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-11-04
 
 ### Added
 - Several servers in one extension (`servers[]`), each with its own base URL, paths, endpoint map, poll interval, timeout and TLS settings; shared settings under `advanced`. One unreachable server never stalls the others.
