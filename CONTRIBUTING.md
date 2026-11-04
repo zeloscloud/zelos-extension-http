@@ -61,7 +61,7 @@ zelos-extension-http/
 │   ├── test_http.py                # Against the simulator: reachability, actions, TLS
 │   └── test_e2e.py                 # main.py --file, read back from the trace
 ├── assets/
-│   └── icon.svg                    # Marketplace icon
+│   └── icon.png                    # Marketplace icon
 ├── .github/
 │   ├── workflows/
 │   │   ├── CI.yml
