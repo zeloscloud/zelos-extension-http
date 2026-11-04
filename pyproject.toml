@@ -1,14 +1,21 @@
 [project]
 name = "zelos-extension-http"
 version = "0.2.0"
-description = "Poll HTTP and HTTPS REST APIs on an interval and record values from their JSON responses as signals. Write setpoints back with PUT, send one-off requests, and set auth headers."
+description = "Poll HTTP and HTTPS REST APIs and record their JSON responses as signals: every field discovered, or named, typed signals from an endpoint map. Write setpoints back with PUT and send one-off requests."
 authors = [{ name = "Zelos", email = "support@zeloscloud.io" }]
 readme = "README.md"
 requires-python = ">=3.11"
 keywords = ["zelos", "extension", "http", "rest", "api", "iot"]
 dependencies = [
+    # 0.0.13 floor: hidden and read-only actions (get_status, list_endpoints and
+    # auto_config are for the config form and Zelos AI) and standalone actions
+    # (auto_config runs with the extension stopped). Older SDKs accept `hidden=`
+    # and silently drop it.
     "zelos-sdk>=0.0.13",
+    # 3.9.0 floor: the first release with Python 3.12 wheels; the client and the
+    # aiohttp.web simulator API used here are older.
     "aiohttp>=3.9.0",
+    # 1.8.0 floor: the oldest release tested; main.py uses only its click drop-in API.
     "rich-click>=1.8.0",
 ]
 
@@ -24,6 +31,9 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pre-commit>=4.6.2",
     "ruff>=0.16.10",
+    # 1.2.0 floor: certificates Python 3.13's strict X.509 verification accepts;
+    # the TLS tests' private CA.
+    "trustme>=1.2.0",
 ]
 
 [build-system]
@@ -43,7 +53,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
-target-version = 'py311'
+target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
@@ -57,3 +67,9 @@ select = [
     "C4",   # flake8-comprehensions
     "PTH",  # flake8-use-pathlib
 ]
+ignore = [
+    "B008",   # function call in defaults (common in decorators)
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

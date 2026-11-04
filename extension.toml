@@ -1,11 +1,11 @@
 name = "HTTP"
 version = "0.2.0"
-description = "Poll HTTP and HTTPS REST APIs on an interval and record values from their JSON responses as signals. Write setpoints back with PUT, send one-off requests, and set auth headers."
+description = "Poll HTTP and HTTPS REST APIs and record their JSON responses as signals: every field discovered, or named, typed signals from an endpoint map. Write setpoints back with PUT and send one-off requests."
 author = "Zelos"
 repository = "https://github.com/zeloscloud/zelos-extension-http"
 # At most 20 keywords and 10 categories. Marketplace search matches both, the name, description,
 # author and repository. Zelos AI sees the name, description and keywords, not the categories.
-keywords = ["http", "rest", "api", "iot", "monitoring", "rest api", "web api", "json path", "polling", "get request", "post request", "put request", "bearer token", "api key", "authorization", "ssl", "http client", "web service", "gateway", "setpoint"]
+keywords = ["http", "https", "rest", "api", "iot", "monitoring", "rest api", "web api", "json", "json path", "polling", "get request", "post request", "put request", "tls", "ssl", "http client", "web service", "gateway", "setpoint"]
 categories = ["IoT", "Networking", "Monitoring", "Industrial"]
 icon = "assets/icon.png"
 readme = "README.md"

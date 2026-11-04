@@ -1,155 +1,167 @@
+#!/usr/bin/env python3
 """Zelos HTTP Extension - CLI entry point.
 
 Modes:
-1. App mode (default): Loads configuration from config.json when run from Zelos App
-2. Demo mode: Uses built-in weather station simulator (no server required)
-3. CLI trace mode: Direct command-line usage with explicit arguments
+
+1. App mode (default): configuration comes from the Zelos App
+2. Demo mode: built-in weather station simulator, no server needed
+3. CLI trace mode: one server's base URL, paths and endpoint map on the command line
 
 Examples:
-    uv run main.py                           # App mode
-    uv run main.py demo                      # Demo mode
-    uv run main.py trace http://host:8080 endpoints.json
+    uv run main.py                                          # app mode
+    uv run main.py --file                                   # app mode, also record a .trz
+    uv run main.py demo                                     # simulated weather station
+    uv run main.py demo-server --port 8090                  # standalone simulator
+    uv run main.py trace http://192.168.1.100:8080 -p /api/status
 """
 
 from __future__ import annotations
 
 import logging
-import signal
-import sys
-from types import FrameType
-from typing import TYPE_CHECKING
+import time
+from pathlib import Path
 
 import rich_click as click
-import zelos_sdk
-from zelos_sdk.hooks.logging import TraceLoggingHandler
 
-if TYPE_CHECKING:
-    from zelos_extension_http.client import HttpClient
+from zelos_extension_http import ACTION_PREFIX as _ACTION_PREFIX
+from zelos_extension_http.cli import app as app_mode
+from zelos_extension_http.client import default_server_name
 
+#: Re-exported so a packaging-time action inventory - which reads this entry
+#: module - sees the same namespace the live registration uses. See the
+#: definition in `zelos_extension_http/__init__.py`.
+ACTION_PREFIX = _ACTION_PREFIX
+
+# UTC ISO 8601 with ms, matching the SDK's Rust tracing lines in the same log stream
+logging.Formatter.converter = time.gmtime
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s.%(msecs)03dZ %(levelname)5s %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
-_client: HttpClient | None = None
-
-
-def shutdown_handler(signum: int, frame: FrameType | None) -> None:
-    """Handle graceful shutdown on SIGTERM or SIGINT."""
-    logger.info("Shutting down...")
-    if _client:
-        _client.stop()
-    sys.exit(0)
+# aiohttp logs connection details and the simulator's access lines; only DEBUG
+# re-opens them - see cli/app.apply_log_level.
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
 
 @click.group(invoke_without_command=True)
-@click.option("--demo", is_flag=True, help="Run in demo mode with simulated weather station")
+@click.option("--demo", is_flag=True, help="Run against the built-in weather station simulator")
+@click.option(
+    "--file",
+    type=click.Path(path_type=Path),
+    default=None,
+    is_flag=False,
+    flag_value=".",
+    help="Record trace to .trz file (defaults to UTC.trz if no filename specified)",
+)
 @click.pass_context
-def cli(ctx: click.Context, demo: bool) -> None:
-    """Zelos HTTP Extension - Poll and monitor REST API endpoints.
+def cli(ctx: click.Context, demo: bool, file: Path | None) -> None:
+    """Zelos HTTP Extension - poll REST APIs and trace their JSON responses.
 
-    When run without a subcommand, starts in app mode using configuration
-    from the Zelos App (config.json).
-
-    Use --demo flag or 'demo' subcommand for simulated weather station.
-    Use 'trace' subcommand for direct CLI access without Zelos App.
+    Without a subcommand this starts in app mode using the configuration saved
+    by the Zelos App. Use --demo or the 'demo' subcommand for a simulated
+    weather station, and 'trace' for direct CLI access.
     """
     if ctx.invoked_subcommand is None:
-        run_app_mode(demo=demo)
-
-
-def run_app_mode(demo: bool = False) -> None:
-    """Run in app mode with Zelos SDK initialization."""
-    signal.signal(signal.SIGTERM, shutdown_handler)
-    signal.signal(signal.SIGINT, shutdown_handler)
-
-    from zelos_extension_http.cli.app import run_app_mode as _run_app_mode
-
-    _run_app_mode(demo=demo)
+        app_mode.run_app_mode(demo=demo, record=file)
 
 
 @cli.command()
 def demo() -> None:
-    """Run demo mode with simulated weather station.
+    """Run against the built-in weather station simulator.
 
-    Starts a local HTTP server with simulated sensor data
-    and connects to it. No hardware or external server required.
-
-    The simulated weather station includes:
-    - Environmental sensors (temperature, humidity, pressure, wind)
-    - Power system (battery, solar)
-    - System status (CPU, memory, uptime)
-    - Writable configuration endpoints
+    Starts a local REST API with simulated environment, power, system and
+    writable config endpoints, then traces it through the demo endpoint map.
+    No server required.
     """
-    run_app_mode(demo=True)
+    app_mode.run_app_mode(demo=True)
+
+
+@cli.command("demo-server")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address")
+@click.option("--port", type=int, default=app_mode.DEMO_PORT, show_default=True, help="TCP port")
+def demo_server(host: str, port: int) -> None:
+    """Run the weather station simulator standalone until Ctrl-C.
+
+    \b
+    Endpoints:
+        GET /api/sensors   temperature, humidity, pressure, wind {direction, gust}
+        GET /api/power     battery, solar, charging, cell_voltages [4]
+        GET /api/system    uptime, CPU temperature, memory, firmware, hostname
+        GET/PUT /api/config  sample_rate, alarm_threshold, station_name
+    """
+    import asyncio
+
+    from zelos_extension_http.demo.simulator import run_sim
+
+    try:
+        asyncio.run(run_sim(host, port))
+    except OSError as e:
+        raise click.ClickException(
+            f"Could not start simulator on {host}:{port} ({e}); one may already be running there"
+        ) from e
 
 
 @cli.command()
 @click.argument("base_url", type=str)
 @click.argument("endpoint_map_file", type=click.Path(exists=True), required=False)
+@click.option(
+    "--path",
+    "-p",
+    "paths",
+    multiple=True,
+    help="Path polled without a map, its JSON traced as it comes (repeatable)",
+)
 @click.option("--interval", "-i", type=float, default=1.0, help="Poll interval in seconds")
 @click.option("--timeout", type=float, default=5.0, help="Request timeout in seconds")
-@click.option("--header", "-H", multiple=True, help="Custom header (Key: Value)")
+@click.option("--ca-file", default="", help="CA certificates (PEM) that verify the server")
+@click.option("--cert-file", default="", help="Client certificate (PEM), for mutual TLS")
+@click.option("--key-file", default="", help="Client private key (PEM)")
+@click.option("--no-verify-tls", is_flag=True, help="Accept any server certificate (warns)")
 def trace(
     base_url: str,
     endpoint_map_file: str | None,
+    paths: tuple[str, ...],
     interval: float,
     timeout: float,
-    header: tuple[str, ...],
+    ca_file: str,
+    cert_file: str,
+    key_file: str,
+    no_verify_tls: bool,
 ) -> None:
-    """Trace HTTP endpoints from command line.
+    """Trace one HTTP server from the command line.
 
-    BASE_URL is the server base URL (e.g., http://192.168.1.100:8080).
-
-    ENDPOINT_MAP_FILE is an optional path to a JSON endpoint map file.
+    BASE_URL is the server (e.g. http://192.168.1.100:8080).
+    ENDPOINT_MAP_FILE is an optional JSON endpoint map.
 
     \b
     Examples:
-        # With endpoint map
         uv run main.py trace http://192.168.1.100:8080 endpoints.json
-
-        # With custom headers
-        uv run main.py trace http://api.example.com endpoints.json -H "Authorization: Bearer token"
+        uv run main.py trace http://127.0.0.1:8090 -p /api/sensors -p /api/power
+        uv run main.py trace https://gateway.local --ca-file ca.pem -p /api/status
     """
-    from zelos_extension_http.client import HttpClient
-    from zelos_extension_http.endpoint_map import EndpointMap
-
-    signal.signal(signal.SIGTERM, shutdown_handler)
-    signal.signal(signal.SIGINT, shutdown_handler)
-
-    # Parse headers
-    headers: dict[str, str] = {}
-    for h in header:
-        if ":" in h:
-            key, value = h.split(":", 1)
-            headers[key.strip()] = value.strip()
-
-    # Load endpoint map if provided
-    endpoint_map = None
-    if endpoint_map_file:
-        try:
-            endpoint_map = EndpointMap.from_file(endpoint_map_file)
-            logger.info(f"Loaded endpoint map with {len(endpoint_map.endpoints)} endpoints")
-        except Exception as e:
-            raise click.ClickException(f"Invalid endpoint map: {e}") from e
-
-    global _client
-    _client = HttpClient(
-        base_url=base_url,
-        endpoint_map=endpoint_map,
-        poll_interval=interval,
-        timeout=timeout,
-        headers=headers,
+    # The host only: a URL may carry a password, refused at config.
+    logger.info("Starting HTTP trace: %s", default_server_name(base_url))
+    # One server through the same resolution as app mode.
+    app_mode.run_config(
+        {
+            "servers": [
+                {
+                    "base_url": base_url,
+                    "paths": list(paths),
+                    "endpoint_map_file": endpoint_map_file or "",
+                    "poll_interval": interval,
+                    "verify_tls": not no_verify_tls,
+                    "ca_file": ca_file,
+                    "cert_file": cert_file,
+                    "key_file": key_file,
+                }
+            ],
+            "advanced": {"timeout": timeout},
+        }
     )
-
-    zelos_sdk.actions_registry.register(_client)
-    zelos_sdk.init(name="zelos_extension_http", actions=True)
-
-    logger.info(f"Starting HTTP trace: {base_url}")
-    _client.start()
-    logging.getLogger().addHandler(TraceLoggingHandler(_client.source))
-    _client.run()
 
 
 if __name__ == "__main__":

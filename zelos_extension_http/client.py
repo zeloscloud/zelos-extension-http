@@ -1,553 +1,684 @@
-"""Core HTTP client with Zelos SDK integration."""
+"""One HttpClient per server, all polled in one HttpRunner event loop."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import signal
+import socket
+import ssl
+import time
+from collections.abc import Callable, Coroutine, Sequence
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import zelos_sdk
 
-from zelos_extension_http.endpoint_map import Endpoint, EndpointMap
+from zelos_extension_http.constants import HEALTH_EVENT, trace_layout
+from zelos_extension_http.discovery import BOOL, NUMBER, STRING, event_name, flatten, kind_of
+from zelos_extension_http.endpoint_map import (
+    SDK_DATATYPES,
+    Endpoint,
+    EndpointMap,
+    coerce_value,
+    encode_value,
+    extract_json_value,
+)
 
 logger = logging.getLogger(__name__)
 
-SDK_DATATYPE_MAP = {
-    "bool": zelos_sdk.DataType.Boolean,
-    "uint8": zelos_sdk.DataType.UInt8,
-    "int8": zelos_sdk.DataType.Int8,
-    "uint16": zelos_sdk.DataType.UInt16,
-    "int16": zelos_sdk.DataType.Int16,
-    "uint32": zelos_sdk.DataType.UInt32,
-    "int32": zelos_sdk.DataType.Int32,
-    "float32": zelos_sdk.DataType.Float32,
-    "uint64": zelos_sdk.DataType.UInt64,
-    "int64": zelos_sdk.DataType.Int64,
-    "float64": zelos_sdk.DataType.Float64,
+# Reconnect backoff: a server down for hours costs one attempt a minute.
+RECONNECT_INITIAL = 3.0
+RECONNECT_MAX = 60.0
+
+# Ceiling on stopping every server: a wedged request must not make the process unkillable.
+SHUTDOWN_TIMEOUT = 3.0
+
+
+def _version() -> str:
+    try:
+        return version("zelos-extension-http")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+#: Every request: the extension reads JSON and names itself; nothing else is sent.
+HEADERS = {"Accept": "application/json", "User-Agent": f"zelos-extension-http/{_version()}"}
+
+HEALTH_FIELDS = (
+    ("reachable", zelos_sdk.DataType.Boolean, ""),
+    ("last_status", zelos_sdk.DataType.UInt16, ""),
+    ("latency_ms", zelos_sdk.DataType.Float32, "ms"),
+    ("errors", zelos_sdk.DataType.UInt32, ""),
+)
+_UINT32_MAX = 2**32 - 1
+
+DISCOVERED_TYPES = {
+    BOOL: zelos_sdk.DataType.Boolean,
+    NUMBER: zelos_sdk.DataType.Float64,
+    STRING: zelos_sdk.DataType.String,
 }
 
+#: Response headers `send_request` returns; the rest are transport detail.
+RESPONSE_HEADERS = ("Content-Type", "Content-Length", "Location", "ETag", "Last-Modified")
 
-def extract_json_value(data: Any, json_path: str) -> Any:
-    """Extract a value from nested JSON data using dot-notation path.
 
-    Args:
-        data: Parsed JSON data (dict or list)
-        json_path: Dot-separated path (e.g., "data.sensors.temperature")
+def has_userinfo(url: str) -> bool:
+    """Whether `url` carries `user[:password]@`: the extension never sends credentials."""
+    return "@" in urlparse(url.strip()).netloc
 
-    Returns:
-        Extracted value, or None if path is invalid
+
+def default_server_name(base_url: str) -> str:
+    """The base URL host as a trace name: `weather01`, `192_168_1_10`."""
+    return zelos_sdk.sanitize_name(urlparse(base_url).hostname or base_url, kind="source")
+
+
+def url_port(base_url: str) -> int:
+    """The base URL's port, explicit or the scheme's."""
+    parsed = urlparse(base_url)
+    return parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+def tls_context(
+    verify: bool = True, ca_file: str = "", cert_file: str = "", key_file: str = ""
+) -> ssl.SSLContext:
+    """The TLS settings of one server. `ca_file` replaces the system's CAs.
+
+    Raises:
+        ValueError: A key without a certificate
+        OSError, ssl.SSLError: An unreadable or mismatched file
     """
-    if not json_path:
-        return data
-
-    current = data
-    for key in json_path.split("."):
-        if isinstance(current, dict) and key in current:
-            current = current[key]
-        elif isinstance(current, list):
-            try:
-                current = current[int(key)]
-            except (ValueError, IndexError):
-                return None
-        else:
-            return None
-    return current
+    if key_file and not cert_file:
+        raise ValueError("a key file needs its certificate file")
+    ctx = ssl.create_default_context(cafile=ca_file or None)
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    if cert_file:
+        ctx.load_cert_chain(cert_file, key_file or None)
+    return ctx
 
 
-def coerce_value(raw: Any, datatype: str, scale: float = 1.0) -> Any:
-    """Coerce a raw value to the target datatype with scaling.
+def parse_json(raw: bytes, path: str) -> Any:
+    """A response body as JSON, whatever its Content-Type: devices often mislabel it.
 
-    Args:
-        raw: Raw value from JSON
-        datatype: Target data type string
-        scale: Scale factor to apply
-
-    Returns:
-        Coerced value, or None if conversion fails
+    Raises:
+        ValueError: If the body is not JSON
     """
-    if raw is None:
-        return None
-
     try:
-        if datatype == "string":
-            return str(raw)
-        if datatype == "bool":
-            return bool(raw)
+        return json.loads(raw)
+    except ValueError:
+        raise ValueError(f"The response of {path} is not JSON") from None
 
-        numeric = float(raw) * scale
 
-        if datatype in ("uint8", "int8", "uint16", "int16", "uint32", "int32", "uint64", "int64"):
-            return int(numeric)
-        # float32, float64
-        return float(numeric)
-    except (ValueError, TypeError):
-        return None
+def describe_error(error: BaseException | None, timeout: float) -> tuple[str, str]:
+    """(what failed, what the user does) for a request that got no HTTP answer."""
+    check = "check the Base URL and that the server is running"
+    if error is None:
+        return "nothing to poll", "add Paths or an Endpoint Map File"
+    if isinstance(error, TimeoutError):
+        return f"no response within {timeout:g} s", f"{check}, or raise Timeout"
+    if isinstance(error, aiohttp.ClientConnectorCertificateError):
+        reason = getattr(error.certificate_error, "verify_message", "") or error.certificate_error
+        return (
+            f"TLS certificate not trusted ({reason})",
+            "set CA File to the CA that issued the server's certificate, or turn off Verify TLS",
+        )
+    if isinstance(error, aiohttp.ClientConnectorError):
+        os_error = error.os_error
+        if isinstance(os_error, ssl.SSLError):
+            reason = os_error.reason or str(os_error)
+            return f"TLS handshake failed ({reason})", "check the Base URL scheme and TLS files"
+        if isinstance(os_error, ConnectionRefusedError):
+            return "connection refused", check
+        if isinstance(os_error, socket.gaierror):
+            return f"cannot resolve host '{error.host}'", check
+        return (os_error.strerror or str(os_error)).lower(), check
+    if isinstance(error, aiohttp.ServerDisconnectedError):
+        return "server closed the connection", check
+    return (str(error) or type(error).__name__), check
+
+
+class _ServerLog(logging.LoggerAdapter):
+    """Prefixes every record with the server name; several servers share one log."""
+
+    def process(self, msg: Any, kwargs: Any) -> tuple[Any, Any]:
+        return f"[{self.extra['server']}] {msg}", kwargs
 
 
 class HttpClient:
-    """HTTP client with polling and Zelos SDK integration."""
+    """One server: its session, poll cycle, trace events and health."""
 
     def __init__(
         self,
-        base_url: str = "http://127.0.0.1:8080",
+        name: str,
+        base_url: str,
+        paths: Sequence[str] = (),
         endpoint_map: EndpointMap | None = None,
         poll_interval: float = 1.0,
         timeout: float = 5.0,
-        headers: dict[str, str] | None = None,
-        verify_ssl: bool = True,
+        verify_tls: bool = True,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
+        """Raises ValueError on paths that trace under no name or a name taken twice."""
+        self.name = name
         self.base_url = base_url.rstrip("/")
         self.endpoint_map = endpoint_map
         self.poll_interval = poll_interval
         self.timeout = timeout
-        self.headers = headers or {}
-        self.verify_ssl = verify_ssl
+        self.verify_tls = verify_tls
+        self._ssl = ssl_context
+        self._log = _ServerLog(logger, {"server": name})
+
+        self.paths = list(dict.fromkeys(paths))
+        self._path_events: dict[str, str] = {}
+        map_events = set(endpoint_map.events) if endpoint_map else set()
+        for path in self.paths:
+            event = event_name(path)
+            if not path.startswith("/") or not event:
+                raise ValueError(f"path '{path}' must start with '/' and name a resource")
+            if event in map_events:
+                raise ValueError(f"path '{path}' and the endpoint map both trace event '{event}'")
+            other = next((p for p, e in self._path_events.items() if e == event), None)
+            if other:
+                raise ValueError(f"paths '{other}' and '{path}' both trace as event '{event}'")
+            self._path_events[path] = event
+
+        # (method, path) -> the map's (event, endpoint)s it feeds: one request per cycle.
+        self._mapped: dict[tuple[str, str], list[tuple[str, Endpoint]]] = {}
+        self._last: dict[str, dict[str, Any]] = {}  # map event -> its fields' last values
+        for event, endpoints in (endpoint_map.events if endpoint_map else {}).items():
+            for ep in endpoints:
+                self._mapped.setdefault((ep.method, ep.path), []).append((event, ep))
+        self._requests = list(dict.fromkeys([*self._mapped, *(("GET", p) for p in self.paths)]))
 
         self._session: aiohttp.ClientSession | None = None
-        self._running = False
-        self._connected = False
-        self._poll_count = 0
-        self._error_count = 0
-        self._last_status_code: int | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
+        self._source: zelos_sdk.TraceSource | None = None
+        self._event_prefix = ""
+        self._events: dict[str, zelos_sdk.TraceSourceEvent] = {}
+        # Discovered event -> {field: kind}, fixed by its first response.
+        self._kinds: dict[str, dict[str, str]] = {}
+        # Event -> the path that traces it ("" for the endpoint map).
+        self._owner: dict[str, str] = dict.fromkeys(map_events, "")
+        # Warn-once keys; cleared when the server comes back, so each outage reports afresh.
+        self._warned: set[str] = set()
 
-        # Zelos SDK trace source
-        self.source: zelos_sdk.TraceSourceCacheLast | None = None
+        self.contacted = asyncio.Event()  # set after the first cycle
+        self.reachable = False
+        self.ever_reachable = False
+        self.last_status: int | None = None
+        self.latency_ms: float | None = None
+        self.last_error = ""
+        self.fix = ""
+        self.errors = 0
+        self.poll_count = 0
 
-    def _init_trace_source(self) -> None:
-        """Initialize Zelos trace source from endpoint map."""
-        source_name = self.endpoint_map.name if self.endpoint_map else "http"
-        self.source = zelos_sdk.TraceSourceCacheLast(source_name)
+    # ─── Trace ──────────────────────────────────────────────────────────────
 
-        if not self.endpoint_map or not self.endpoint_map.events:
-            return
+    def start(self, shared: zelos_sdk.TraceSource | None = None) -> None:
+        """Declare the health and map events.
 
-        for event_name, endpoints in self.endpoint_map.events.items():
-            if not endpoints:
-                continue
-
-            fields = []
-            for ep in endpoints:
-                if ep.datatype == "string":
-                    # String fields use a fixed-size representation
-                    dtype = zelos_sdk.DataType.UInt32
-                else:
-                    dtype = SDK_DATATYPE_MAP.get(ep.datatype, zelos_sdk.DataType.Float32)
-                fields.append(zelos_sdk.TraceEventFieldMetadata(ep.name, dtype, ep.unit))
-
-            self.source.add_event(event_name, fields)
-
-    async def connect(self) -> bool:
-        """Create HTTP session and verify connectivity."""
-        try:
-            connector = aiohttp.TCPConnector(ssl=self.verify_ssl if self.verify_ssl else False)
-            client_timeout = aiohttp.ClientTimeout(total=self.timeout)
-            self._session = aiohttp.ClientSession(
-                headers=self.headers,
-                timeout=client_timeout,
-                connector=connector,
+        Args:
+            shared: The prefix's source, events nested as `<server>/<event>`;
+                None for a source of this server's own with unprefixed events
+        """
+        source_name, self._event_prefix = trace_layout(shared.name if shared else "", self.name)
+        self._source = shared or zelos_sdk.TraceSource(source_name)
+        self._declare(HEALTH_EVENT, list(HEALTH_FIELDS))
+        for event, endpoints in (self.endpoint_map.events if self.endpoint_map else {}).items():
+            self._declare(
+                event, [(ep.name, SDK_DATATYPES[ep.datatype], ep.unit) for ep in endpoints]
             )
-            # Test connectivity with a simple request
-            test_url = self.base_url + "/health"
-            async with self._session.get(test_url) as resp:
-                self._connected = resp.status < 500
-                self._last_status_code = resp.status
-                if self._connected:
-                    logger.info(f"Connected to {self.base_url}")
+        if not self.verify_tls:
+            self._log.warning(
+                "TLS certificate verification is off: the server is not authenticated"
+            )
+
+    def _declare(self, event: str, fields: list[tuple[str, zelos_sdk.DataType, str]]) -> None:
+        assert self._source is not None, "start() first"
+        self._events[event] = self._source.add_event(
+            f"{self._event_prefix}{event}",
+            [zelos_sdk.TraceEventFieldMetadata(*f) for f in fields],
+        )
+
+    def _emit(self, event: str, row: dict[str, Any], time_ns: int) -> None:
+        try:
+            self._events[event].log_at(time_ns, **row)
+        except (ValueError, TypeError, RuntimeError) as e:
+            self._warn_once(f"emit:{event}", "Event '%s' not traced: %s", event, e)
+
+    def _warn_once(self, key: str, msg: str, *args: Any) -> None:
+        if key not in self._warned:
+            self._warned.add(key)
+            self._log.warning(msg, *args)
+
+    # ─── Polling ────────────────────────────────────────────────────────────
+
+    async def run(self) -> None:
+        """Poll every interval until cancelled; while unreachable, back off 3 s doubling to 60 s."""
+        self._session = aiohttp.ClientSession(
+            headers=HEADERS,
+            timeout=aiohttp.ClientTimeout(total=self.timeout),
+            connector=aiohttp.TCPConnector(ssl=self._ssl if self._ssl is not None else True),
+        )
+        backoff = RECONNECT_INITIAL
+        try:
+            while True:
+                started = time.monotonic()
+                up = await self.poll_once()
+                self.contacted.set()
+                if up:
+                    backoff = RECONNECT_INITIAL
+                    delay = self.poll_interval - (time.monotonic() - started)
                 else:
-                    logger.warning(f"Server returned {resp.status} on health check")
-            return self._connected
-        except aiohttp.ClientError as e:
-            # Health endpoint may not exist - try the base URL
-            try:
-                async with self._session.get(self.base_url) as resp:
-                    self._connected = resp.status < 500
-                    self._last_status_code = resp.status
-                    if self._connected:
-                        logger.info(f"Connected to {self.base_url}")
-                    return self._connected
-            except aiohttp.ClientError:
-                pass
-            logger.error(f"Connection error: {e}")
-            self._connected = False
-            return False
-        except Exception as e:
-            logger.error(f"Connection error: {e}")
-            self._connected = False
-            return False
-
-    async def disconnect(self) -> None:
-        """Close HTTP session."""
-        if self._session:
-            await self._session.close()
-            self._session = None
-            self._connected = False
-            logger.info("Disconnected from HTTP server")
-
-    async def fetch_endpoint(self, endpoint: Endpoint) -> Any:
-        """Fetch data from a single endpoint.
-
-        Args:
-            endpoint: Endpoint definition
-
-        Returns:
-            Extracted and coerced value, or None on error
-        """
-        if not self._session:
-            return None
-
-        url = self.base_url + endpoint.path
-        try:
-            async with self._session.request(endpoint.method, url) as resp:
-                self._last_status_code = resp.status
-                if resp.status != 200:
-                    logger.warning(f"HTTP {resp.status} from {endpoint.path}")
-                    return None
-                data = await resp.json()
-                raw = extract_json_value(data, endpoint.json_path)
-                return coerce_value(raw, endpoint.datatype, endpoint.scale)
-        except aiohttp.ClientError as e:
-            logger.error(f"Request error for {endpoint.path}: {e}")
-            if self._is_connection_error(e):
-                self._connected = False
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching {endpoint.path}: {e}")
-            return None
-
-    async def fetch_path(self, path: str, method: str = "GET") -> dict | None:
-        """Fetch raw JSON from a path.
-
-        Args:
-            path: URL path
-            method: HTTP method
-
-        Returns:
-            Parsed JSON response or None on error
-        """
-        if not self._session:
-            return None
-
-        url = self.base_url + path
-        try:
-            async with self._session.request(method, url) as resp:
-                self._last_status_code = resp.status
-                if resp.status != 200:
-                    return None
-                return await resp.json()
-        except Exception:
-            return None
-
-    async def write_endpoint(self, endpoint: Endpoint, value: Any) -> bool:
-        """Write a value to a writable endpoint via PUT.
-
-        Args:
-            endpoint: Endpoint definition (must be writable)
-            value: Value to write
-
-        Returns:
-            True if successful
-        """
-        if not endpoint.writable:
-            logger.warning(f"Endpoint '{endpoint.name}' is not writable")
-            return False
-
-        if not self._session:
-            return False
-
-        url = self.base_url + endpoint.path
-        payload = {endpoint.json_path: value} if endpoint.json_path else value
-        try:
-            async with self._session.put(url, json=payload) as resp:
-                self._last_status_code = resp.status
-                return resp.status in (200, 201, 204)
-        except Exception as e:
-            logger.error(f"Write error for {endpoint.path}: {e}")
-            return False
-
-    async def _poll_endpoints(self) -> dict[str, dict[str, Any]]:
-        """Poll all endpoints in the endpoint map.
-
-        Groups endpoints by path to minimize HTTP requests - endpoints
-        sharing the same path are fetched once and values extracted
-        from the single response.
-
-        Returns:
-            Dictionary of {event_name: {field_name: value}}
-        """
-        if not self.endpoint_map or not self._session:
-            return {}
-
-        # Cache fetched paths to avoid duplicate requests
-        path_cache: dict[str, dict] = {}
-
-        results: dict[str, dict[str, Any]] = {}
-
-        for event_name, endpoints in self.endpoint_map.events.items():
-            event_results: dict[str, Any] = {}
-            for ep in endpoints:
-                # Fetch path data (cached per path)
-                if ep.path not in path_cache:
-                    data = await self.fetch_path(ep.path, ep.method)
-                    path_cache[ep.path] = data
-
-                data = path_cache[ep.path]
-                if data is None:
-                    continue
-
-                raw = extract_json_value(data, ep.json_path)
-                value = coerce_value(raw, ep.datatype, ep.scale)
-                if value is not None:
-                    event_results[ep.name] = value
-
-            if event_results:
-                results[event_name] = event_results
-
-        return results
-
-    async def _log_values(self, values: dict[str, dict[str, Any]]) -> None:
-        """Log polled values to Zelos trace source."""
-        if not self.source:
-            return
-
-        for event_name, event_values in values.items():
-            if not event_values:
-                continue
-
-            event = getattr(self.source, event_name, None)
-            if event:
-                # Filter out string values from trace logging
-                numeric_values = {k: v for k, v in event_values.items() if not isinstance(v, str)}
-                if numeric_values:
-                    event.log(**numeric_values)
-
-    def start(self) -> None:
-        """Start the client (initialize trace source)."""
-        self._running = True
-        self._init_trace_source()
-        logger.info("HttpClient started")
-
-    def stop(self) -> None:
-        """Stop the client."""
-        self._running = False
-        logger.info("HttpClient stopped")
-
-    def run(self) -> None:
-        """Run the polling loop (blocking)."""
-        asyncio.run(self._run_async())
-
-    async def _ensure_connected(self) -> bool:
-        """Ensure connection is established, reconnecting if needed."""
-        if self._connected and self._session and not self._session.closed:
-            return True
-
-        self._connected = False
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
-
-        logger.info(f"Connecting to {self.base_url}...")
-        return await self.connect()
-
-    def _run_on_loop(self, coro: Any) -> Any:
-        """Run a coroutine on the main event loop from an action thread.
-
-        Actions are called from SDK background threads, so we need to schedule
-        async work on the running event loop via run_coroutine_threadsafe.
-        """
-        if not (self._loop and self._loop.is_running()):
-            coro.close()
-            raise RuntimeError("The HTTP client is not running")
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=self.timeout + 1)
-
-    async def _run_async(self) -> None:
-        """Async polling loop with automatic reconnection."""
-        self._loop = asyncio.get_running_loop()
-        reconnect_interval = 3.0
-
-        try:
-            while self._running:
-                if not await self._ensure_connected():
-                    logger.warning(f"Connection failed, retrying in {reconnect_interval}s...")
-                    await asyncio.sleep(reconnect_interval)
-                    continue
-
-                try:
-                    values = await self._poll_endpoints()
-                    await self._log_values(values)
-                    self._poll_count += 1
-
-                    if self._poll_count % 10 == 0:
-                        logger.debug(f"Poll #{self._poll_count}: {values}")
-
-                except Exception as e:
-                    self._error_count += 1
-                    logger.error(f"Poll error: {e}")
-
-                    if self._is_connection_error(e):
-                        self._connected = False
-                        logger.warning("Connection lost, will reconnect...")
-                        continue
-
-                await asyncio.sleep(self.poll_interval)
+                    delay, backoff = backoff, min(backoff * 2, RECONNECT_MAX)
+                await asyncio.sleep(max(delay, 0.0))
         finally:
-            await self.disconnect()
+            session, self._session = self._session, None
+            await session.close()
 
-    def _is_connection_error(self, error: Exception) -> bool:
-        """Check if an exception indicates a connection problem."""
-        error_str = str(error).lower()
-        connection_indicators = [
-            "connection",
-            "timeout",
-            "refused",
-            "reset",
-            "broken pipe",
-            "cannot connect",
-            "name or service not known",
-        ]
-        return any(ind in error_str for ind in connection_indicators)
+    async def poll_once(self) -> bool:
+        """One cycle: each distinct request once, in order; True if any got an HTTP answer.
 
-    # SDK Actions
-    @zelos_sdk.action(
-        "Get Status", "Get connection and polling status", read_only=True, hidden=True
-    )
-    def get_status(self) -> dict[str, Any]:
-        """Get current client status."""
+        A failed connect is the host's, not one path's: it ends the cycle. A path that
+        answers badly or times out is warned once and polled again next cycle.
+        """
+        answered: list[tuple[int, float]] = []  # (status, seconds)
+        failed: list[tuple[str, BaseException]] = []
+        for method, path in self._requests:
+            sent = time.monotonic()
+            try:
+                status, _, body = await self._fetch(method, path)
+            except aiohttp.ClientConnectorError as e:
+                self.errors += 1
+                failed.append((path, e))
+                break
+            except (aiohttp.ClientError, TimeoutError) as e:
+                self.errors += 1
+                failed.append((path, e))
+                continue
+            answered.append((status, time.monotonic() - sent))
+            self._handle(method, path, status, body, time.time_ns())
+
+        self.poll_count += 1
+        if answered:
+            if self.ever_reachable and not self.reachable:
+                self._log.info("Reachable again")
+            elif not self.ever_reachable:
+                self._log.info(
+                    "Polling %d requests every %g s", len(self._requests), self.poll_interval
+                )
+            self.reachable = self.ever_reachable = True
+            self.last_error = self.fix = ""
+            self.last_status = answered[-1][0]
+            self.latency_ms = max(seconds for _, seconds in answered) * 1000.0
+            for path, e in failed:
+                self._warn_once(
+                    f"path:{path}", "Path '%s': %s; still polled", path, self._describe(e)[0]
+                )
+        else:
+            self.last_error, self.fix = self._describe(failed[-1][1] if failed else None)
+            if self.reachable:
+                self._log.warning("Unreachable: %s; retrying with backoff", self.last_error)
+                self._warned.clear()
+            self.reachable = False
+        self._log_health(bool(answered))
+        return bool(answered)
+
+    def _describe(self, error: BaseException | None) -> tuple[str, str]:
+        return describe_error(error, self.timeout)
+
+    def _log_health(self, answered: bool) -> None:
+        row: dict[str, Any] = {"reachable": answered, "errors": min(self.errors, _UINT32_MAX)}
+        if answered:  # no answer: status and latency are gaps, not zeros
+            row["last_status"] = self.last_status
+            row["latency_ms"] = self.latency_ms
+        self._emit(HEALTH_EVENT, row, time.time_ns())
+
+    async def _fetch(
+        self, method: str, path: str, body: Any = None
+    ) -> tuple[int, dict[str, str], bytes]:
+        if self._session is None:
+            raise RuntimeError(f"Server '{self.name}' is not running")
+        kwargs = {} if body is None else {"json": body}
+        async with self._session.request(method, self.base_url + path, **kwargs) as resp:
+            headers = {k: resp.headers[k] for k in RESPONSE_HEADERS if k in resp.headers}
+            return resp.status, headers, await resp.read()
+
+    def _handle(self, method: str, path: str, status: int, body: bytes, received_ns: int) -> None:
+        if not 200 <= status < 300:
+            self.errors += 1
+            self._warn_once(f"path:{path}", "Path '%s': HTTP %d; still polled", path, status)
+            return
+        try:
+            data = json.loads(body)
+        except ValueError:
+            self.errors += 1
+            self._warn_once(f"path:{path}", "Path '%s': response is not JSON; still polled", path)
+            return
+        if (method, path) in self._mapped:
+            self._trace_mapped(method, path, data, received_ns)
+        if method == "GET" and path in self._path_events:
+            self._trace_discovered(path, data, received_ns)
+
+    def _trace_mapped(self, method: str, path: str, data: Any, received_ns: int) -> None:
+        """One row per event the response maps into, every field carried: the ones this
+        response sets, the rest (endpoints on other paths) at their last value this
+        session, as OPC UA does, so a latest-value read of the event is whole."""
+        rows: dict[str, dict[str, Any]] = {}
+        for event, ep in self._mapped[(method, path)]:
+            value = coerce_value(extract_json_value(data, ep.json_path), ep.datatype, ep.scale)
+            if value is None:
+                self._warn_once(
+                    f"map:{event}/{ep.name}",
+                    "Endpoint '%s/%s': no %s value at json_path '%s' of %s; still polled",
+                    event,
+                    ep.name,
+                    ep.datatype,
+                    ep.json_path,
+                    path,
+                )
+            else:
+                rows.setdefault(event, {})[ep.name] = value
+        for event, row in rows.items():
+            last = self._last.setdefault(event, {})
+            last.update(row)
+            self._emit(event, last, received_ns)
+
+    def _trace_discovered(self, path: str, data: Any, received_ns: int) -> None:
+        """Declare each event at its first response; later changes to it are warned once.
+
+        A declared schema is fixed per trace source, so a field that first appears
+        later, or changes kind, is not traced until restart rather than re-declared.
+        """
+        rows, notes = flatten(self._path_events[path], data)
+        for key, note in notes:
+            self._warn_once(f"note:{key}", "%s", note)
+        for event, fields in rows.items():
+            owner = self._owner.setdefault(event, path)
+            if owner != path:
+                self._warn_once(
+                    f"owner:{event}:{path}",
+                    "Event '%s' of %s is already traced from %s; not traced",
+                    event,
+                    path,
+                    owner or "the endpoint map",
+                )
+                continue
+            kinds = self._kinds.get(event)
+            if kinds is None:
+                kinds = self._kinds[event] = {f: kind_of(v) for f, v in fields.items()}
+                self._declare(event, [(f, DISCOVERED_TYPES[k], "") for f, k in kinds.items()])
+            row = {}
+            for field, value in fields.items():
+                kind = kind_of(value)
+                if field not in kinds:
+                    self._warn_once(
+                        f"new:{event}.{field}",
+                        "Event '%s': field '%s' appeared after the first response; "
+                        "traced after a restart",
+                        event,
+                        field,
+                    )
+                elif kinds[field] != kind:
+                    self._warn_once(
+                        f"kind:{event}.{field}",
+                        "Event '%s': field '%s' is now %s, was %s; not traced",
+                        event,
+                        field,
+                        kind,
+                        kinds[field],
+                    )
+                else:
+                    row[field] = float(value) if kind == NUMBER else value
+            if row:
+                self._emit(event, row, received_ns)
+
+    # ─── Action support (coroutines run in the polling loop) ────────────────
+
+    async def request(
+        self, method: str, path: str, body: Any = None
+    ) -> tuple[int, dict[str, str], bytes]:
+        """One request on this server's session: (status, headers, body).
+
+        Raises:
+            RuntimeError: No HTTP answer, or a status of 300 and up
+        """
+        try:
+            status, headers, raw = await self._fetch(method, path, body)
+        except (aiohttp.ClientError, TimeoutError) as e:
+            raise RuntimeError(f"{method} {path}: {self._describe(e)[0]}") from e
+        if status >= 300:
+            text = raw.decode(errors="replace").strip()
+            raise RuntimeError(f"{method} {path} answered HTTP {status}: {text[:200]}")
+        return status, headers, raw
+
+    async def read_endpoint(self, ep: Endpoint) -> Any:
+        """The endpoint's current value, coerced and scaled as it is traced."""
+        _, _, raw = await self.request(ep.method, ep.path)
+        found = extract_json_value(parse_json(raw, ep.path), ep.json_path)
+        value = coerce_value(found, ep.datatype, ep.scale)
+        if value is None:
+            raise ValueError(
+                f"No {ep.datatype} value at json_path '{ep.json_path}' of {ep.path}: got {found!r}"
+            )
+        return value
+
+    async def read_path(self, path: str) -> dict[str, Any]:
+        """GET a path: the events its response traces as."""
+        status, _, raw = await self.request("GET", path)
+        event = self._path_events.get(path) or event_name(path)
+        rows, notes = flatten(event, parse_json(raw, path))
+        return {"status": status, "events": rows, "notes": [note for _, note in notes]}
+
+    async def write_endpoint(self, ep: Endpoint, value: Any) -> int:
+        """PUT `value` (map units) to the endpoint; `{json_path: value}` when it has one.
+
+        Raises:
+            TimeoutError: No answer in time: the server may still have applied the PUT
+        """
+        raw = encode_value(value, ep.datatype, ep.scale)
+        try:
+            status, _, _ = await self.request(
+                "PUT", ep.path, {ep.json_path: raw} if ep.json_path else raw
+            )
+        except RuntimeError as e:
+            if isinstance(e.__cause__, TimeoutError):
+                raise TimeoutError(
+                    f"PUT {ep.path} got no response within {self.timeout:g} s; it may have "
+                    "reached the server and been applied - read the endpoint to confirm"
+                ) from e
+            raise
+        return status
+
+    # ─── Status ─────────────────────────────────────────────────────────────
+
+    @property
+    def state(self) -> str:
+        """ok, connecting (before the first cycle) or unreachable."""
+        if self.reachable:
+            return "ok"
+        return "unreachable" if self.contacted.is_set() else "connecting"
+
+    def status(self) -> dict[str, Any]:
+        """Reachability and counters."""
         return {
-            "connected": self._connected,
+            "server": self.name,
             "base_url": self.base_url,
-            "poll_count": self._poll_count,
-            "error_count": self._error_count,
+            "state": self.state,
+            "reachable": self.reachable,
+            "last_status": self.last_status,
+            "latency_ms": self.latency_ms,
+            "last_error": self.last_error,
+            "errors": self.errors,
+            "poll_count": self.poll_count,
             "poll_interval": self.poll_interval,
-            "last_status_code": self._last_status_code,
+            "timeout": self.timeout,
+            "verify_tls": self.verify_tls,
             "endpoints": len(self.endpoint_map.endpoints) if self.endpoint_map else 0,
+            "paths": len(self.paths),
         }
 
-    @zelos_sdk.action("Send Request", "Send an HTTP request and display the response")
-    @zelos_sdk.action.text("path", title="URL Path (e.g., /api/sensors)")
-    @zelos_sdk.action.select(
-        "method",
-        choices=["GET", "POST", "PUT"],
-        default="GET",
-        title="HTTP Method",
-    )
-    @zelos_sdk.action.text(
-        "body", title="Request Body (JSON, optional)", required=False, default=""
-    )
-    def send_request(self, path: str, method: str, body: str) -> dict[str, Any]:
-        """Send an arbitrary HTTP request."""
-        url = self.base_url + path
-
-        async def _send() -> dict[str, Any]:
-            if not self._session or self._session.closed:
-                await self.connect()
-            if not self._session:
-                return {"error": "Not connected", "success": False}
-
-            kwargs: dict[str, Any] = {}
-            if body and body.strip():
-                try:
-                    kwargs["json"] = json.loads(body)
-                except json.JSONDecodeError:
-                    kwargs["data"] = body
-
-            try:
-                async with self._session.request(method, url, **kwargs) as resp:
-                    try:
-                        resp_data = await resp.json()
-                    except Exception:
-                        resp_data = await resp.text()
-                    return {
-                        "status_code": resp.status,
-                        "response": resp_data,
-                        "success": resp.status < 400,
-                    }
-            except Exception as e:
-                return {"error": str(e), "success": False}
-
-        return self._run_on_loop(_send())
-
-    @zelos_sdk.action(
-        "List Endpoints", "List all configured endpoints", read_only=True, hidden=True
-    )
-    def list_endpoints(self) -> dict[str, Any]:
-        """List all endpoints in the endpoint map."""
-        if not self.endpoint_map:
-            return {"endpoints": [], "count": 0}
-
-        eps = [
+    def listing(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """(mapped endpoints, discovered paths with the fields traced so far and their kinds)."""
+        endpoints = [
             {
+                "server": self.name,
+                "event": event,
                 "name": ep.name,
                 "path": ep.path,
                 "method": ep.method,
+                "json_path": ep.json_path,
                 "datatype": ep.datatype,
                 "unit": ep.unit,
-                "json_path": ep.json_path,
+                "scale": ep.scale,
                 "writable": ep.writable,
             }
-            for ep in self.endpoint_map.endpoints
+            for event, eps in (self.endpoint_map.events if self.endpoint_map else {}).items()
+            for ep in eps
         ]
-        return {"endpoints": eps, "count": len(eps)}
+        paths = [
+            {
+                "server": self.name,
+                "path": path,
+                "event": event,
+                "events": {e: dict(k) for e, k in self._kinds.items() if self._owner[e] == path},
+            }
+            for path, event in self._path_events.items()
+        ]
+        return endpoints, paths
 
-    @zelos_sdk.action("Read Endpoint", "Read a value from a named endpoint")
-    @zelos_sdk.action.text("name", title="Endpoint Name")
-    def read_endpoint(self, name: str) -> dict[str, Any]:
-        """Read a single endpoint by name."""
-        if not self.endpoint_map:
-            return {"error": "No endpoint map loaded", "success": False}
 
-        ep = self.endpoint_map.get_by_name(name)
-        if not ep:
-            return {"error": f"Endpoint '{name}' not found", "success": False}
+class HttpRunner:
+    """The one event loop every server polls in: signals, stop, action dispatch.
 
-        async def _read() -> Any:
-            if not self._session or self._session.closed:
-                await self.connect()
-            return await self.fetch_endpoint(ep)
+    Shutdown cancels every server at once: it costs SHUTDOWN_TIMEOUT in total, not per server.
+    """
 
-        value = self._run_on_loop(_read())
-        return {
-            "name": name,
-            "path": ep.path,
-            "value": value,
-            "unit": ep.unit,
-            "success": value is not None,
-        }
+    def __init__(self, clients: Sequence[HttpClient], retry_unreachable: bool = False) -> None:
+        """`clients`: one per server, names unique (checked at config load)."""
+        self.clients = {c.name: c for c in clients}
+        self.retry_unreachable = retry_unreachable
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop = asyncio.Event()
+        # Servers unreachable at start, without retry: the caller exits 1.
+        self.failed_at_start: list[HttpClient] = []
 
-    @zelos_sdk.action("Write Endpoint", "Write a value to a writable endpoint")
-    @zelos_sdk.action.text("name", title="Endpoint Name")
-    @zelos_sdk.action.text("value", title="Value")
-    def write_endpoint_action(self, name: str, value: str) -> dict[str, Any]:
-        """Write a value to a named writable endpoint."""
-        if not self.endpoint_map:
-            return {"error": "No endpoint map loaded", "success": False}
+    def run(self) -> None:
+        """Run every server until shutdown (blocking)."""
+        asyncio.run(self._run_async())
 
-        ep = self.endpoint_map.get_by_name(name)
-        if not ep:
-            return {"error": f"Endpoint '{name}' not found", "success": False}
-
-        if not ep.writable:
-            return {"error": f"Endpoint '{name}' is not writable", "success": False}
-
-        # Parse value to appropriate type
-        typed_value: Any
+    async def _run_async(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        remove_signal_handlers = self._install_signal_handlers()
+        tasks = [asyncio.create_task(c.run()) for c in self.clients.values()]
+        stop = asyncio.ensure_future(self._stop.wait())
+        contact = asyncio.ensure_future(
+            asyncio.gather(*(c.contacted.wait() for c in self.clients.values()))
+        )
         try:
-            typed_value = json.loads(value)
-        except (json.JSONDecodeError, TypeError):
-            typed_value = value
+            await asyncio.wait({contact, stop, *tasks}, return_when=asyncio.FIRST_COMPLETED)
+            if contact.done() and not self._stop_at_start():
+                # Until stopped, or a server task crashed (a bug).
+                await asyncio.wait({stop, *tasks}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            contact.cancel()
+            stop.cancel()
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                _, pending = await asyncio.wait(tasks, timeout=SHUTDOWN_TIMEOUT)
+                if pending:
+                    logger.warning(
+                        "%d server(s) still stopping after %g s", len(pending), SHUTDOWN_TIMEOUT
+                    )
+            remove_signal_handlers()
+        for task in tasks:
+            if task.done() and not task.cancelled() and task.exception():
+                raise task.exception()
 
-        async def _write() -> bool:
-            if not self._session or self._session.closed:
-                await self.connect()
-            return await self.write_endpoint(ep, typed_value)
+    def _stop_at_start(self) -> bool:
+        """After every server's first cycle, one ERROR per server that got no answer.
 
-        success = self._run_on_loop(_write())
-        return {
-            "name": name,
-            "path": ep.path,
-            "value": typed_value,
-            "success": success,
-        }
+        First contact is required unless `retry_unreachable`: a server that is not
+        there at start is a config error, fixed before starting again. Once a server
+        has answered, an outage goes through the backoff.
+        """
+        down = [c for c in self.clients.values() if not c.reachable]
+        for c in down:
+            then = (
+                "retrying with backoff while the other servers poll"
+                if self.retry_unreachable
+                else f"{c.fix}, then start the extension again"
+            )
+            logger.error(
+                "Server '%s' (%s): cannot connect: %s; %s", c.name, c.base_url, c.last_error, then
+            )
+        if down and not self.retry_unreachable:
+            self.failed_at_start = down
+            return True
+        return False
+
+    def stop(self) -> None:
+        """Request shutdown. Safe from any thread, including a signal handler."""
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._stop.set)
+        else:
+            self._stop.set()
+
+    def _install_signal_handlers(self) -> Callable[[], None]:
+        """Set the stop event on SIGTERM/SIGINT; returns the uninstaller.
+
+        sys.exit from a signal.signal handler would skip closing the sessions.
+        """
+        loop, event = self._loop, self._stop
+        assert loop is not None
+
+        def request_stop() -> None:
+            logger.info("Shutdown signal received, stopping")
+            event.set()
+
+        installed: list[int] = []
+        replaced: dict[int, Any] = {}
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, request_stop)
+                installed.append(sig)
+            except (NotImplementedError, RuntimeError, ValueError):
+                # Windows, or off the main thread: signal.signal where it works.
+                with contextlib.suppress(ValueError, OSError):
+                    replaced[sig] = signal.signal(
+                        sig, lambda *_: loop.call_soon_threadsafe(request_stop)
+                    )
+
+        def remove() -> None:
+            for sig in installed:
+                with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+                    loop.remove_signal_handler(sig)
+            for sig, prior in replaced.items():
+                with contextlib.suppress(ValueError, OSError, TypeError):
+                    signal.signal(sig, prior if prior is not None else signal.SIG_DFL)
+
+        return remove
+
+    def run_coro(self, coro: Coroutine[Any, Any, Any], timeout: float) -> Any:
+        """Run an action's coroutine in the polling loop, on its server's session.
+
+        Raises:
+            RuntimeError: If the polling loop is not running
+            TimeoutError: If the coroutine outlives `timeout`, having cancelled it
+        """
+        if self._loop is None or not self._loop.is_running():
+            coro.close()
+            raise RuntimeError("extension is not running")
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
