@@ -172,6 +172,32 @@ async def test_a_write_without_an_answer_says_it_may_have_applied():
         await server.cleanup()
 
 
+def test_a_mapped_row_carries_the_fields_other_paths_set():
+    """An event whose endpoints sit on two paths: each response's row carries the other
+    path's fields at their last value, so the event's latest values read whole."""
+    endpoint_map = EndpointMap.from_dict(
+        {
+            "events": {
+                "env": [
+                    {"name": "temp", "path": "/api/sensors", "json_path": "temperature"},
+                    {"name": "volts", "path": "/api/power", "json_path": "battery_voltage"},
+                ]
+            }
+        }
+    )
+    client = HttpClient("wx", "http://127.0.0.1:1", endpoint_map=endpoint_map)
+    rows: list[tuple[str, dict]] = []
+    client._emit = lambda event, row, _t: rows.append((event, dict(row)))  # type: ignore[method-assign]
+    client._trace_mapped("GET", "/api/sensors", {"temperature": 21.5}, 1)
+    client._trace_mapped("GET", "/api/power", {"battery_voltage": 12.6}, 2)
+    client._trace_mapped("GET", "/api/sensors", {"temperature": 22.0}, 3)
+    assert rows == [
+        ("env", {"temp": 21.5}),
+        ("env", {"temp": 21.5, "volts": 12.6}),
+        ("env", {"temp": 22.0, "volts": 12.6}),
+    ]
+
+
 def test_actions_need_a_running_extension():
     actions.set_runner(HttpRunner([HttpClient("wx", "http://127.0.0.1:1", paths=["/x"])]))
     try:

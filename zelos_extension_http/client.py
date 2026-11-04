@@ -190,6 +190,7 @@ class HttpClient:
 
         # (method, path) -> the map's (event, endpoint)s it feeds: one request per cycle.
         self._mapped: dict[tuple[str, str], list[tuple[str, Endpoint]]] = {}
+        self._last: dict[str, dict[str, Any]] = {}  # map event -> its fields' last values
         for event, endpoints in (endpoint_map.events if endpoint_map else {}).items():
             for ep in endpoints:
                 self._mapped.setdefault((ep.method, ep.path), []).append((event, ep))
@@ -365,6 +366,9 @@ class HttpClient:
             self._trace_discovered(path, data, received_ns)
 
     def _trace_mapped(self, method: str, path: str, data: Any, received_ns: int) -> None:
+        """One row per event the response maps into, every field carried: the ones this
+        response sets, the rest (endpoints on other paths) at their last value this
+        session, as OPC UA does, so a latest-value read of the event is whole."""
         rows: dict[str, dict[str, Any]] = {}
         for event, ep in self._mapped[(method, path)]:
             value = coerce_value(extract_json_value(data, ep.json_path), ep.datatype, ep.scale)
@@ -381,7 +385,9 @@ class HttpClient:
             else:
                 rows.setdefault(event, {})[ep.name] = value
         for event, row in rows.items():
-            self._emit(event, row, received_ns)
+            last = self._last.setdefault(event, {})
+            last.update(row)
+            self._emit(event, last, received_ns)
 
     def _trace_discovered(self, path: str, data: Any, received_ns: int) -> None:
         """Declare each event at its first response; later changes to it are warned once.
